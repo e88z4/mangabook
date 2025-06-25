@@ -1,0 +1,3 @@
+[submodule "mangadex-api"]
+	path = mangadex-api
+	url = https://github.com/e88z4/mangadex-api.git
