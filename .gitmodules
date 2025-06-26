@@ -1,3 +1,6 @@
 [submodule "mangadex-api"]
 	path = mangadex-api
 	url = https://github.com/e88z4/mangadex-api.git
+[submodule "epub-spec"]
+	path = epub-spec
+	url = https://github.com/kobolabs/epub-spec.git
