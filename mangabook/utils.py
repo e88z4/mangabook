@@ -21,6 +21,100 @@ T = TypeVar('T')
 # Regular expression for invalid filename characters
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Language code mapping for better display
+LANGUAGE_CODES = {
+    "ja": "Japanese",
+    "en": "English",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "zh-hk": "Chinese (HK)",
+    "zh-cn": "Chinese (Simplified)",
+    "zh-tw": "Chinese (Traditional)",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+    "es-la": "Spanish (Latin America)",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "pt-br": "Portuguese (Brazil)",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "th": "Thai",
+    "id": "Indonesian",
+    "vi": "Vietnamese",
+    "pl": "Polish",
+    "tr": "Turkish",
+    "ms": "Malay",
+}
+
+# Status mapping for better display
+MANGA_STATUS = {
+    "ongoing": "Ongoing",
+    "completed": "Completed",
+    "hiatus": "On Hiatus",
+    "cancelled": "Cancelled",
+    "published": "Published",
+    # Add fallbacks for renamed or new status values
+    "on_hiatus": "On Hiatus",
+    "discontinued": "Cancelled",
+    "finished": "Completed"
+}
+
+# Content rating mapping
+CONTENT_RATING = {
+    "safe": "Safe",
+    "suggestive": "Suggestive",
+    "erotica": "Erotica",
+    "pornographic": "Adult",
+    # Fallbacks
+    "nsfw": "Adult"
+}
+
+
+def get_readable_language(lang_code: Optional[str]) -> str:
+    """Convert language code to readable language name.
+    
+    Args:
+        lang_code: The language code to convert.
+        
+    Returns:
+        A human-readable language name.
+    """
+    if not lang_code:
+        return "Unknown"
+    
+    return LANGUAGE_CODES.get(lang_code.lower(), lang_code)
+
+
+def get_readable_status(status: Optional[str]) -> str:
+    """Convert status code to readable status.
+    
+    Args:
+        status: The status code to convert.
+        
+    Returns:
+        A human-readable status.
+    """
+    if not status:
+        return "Unknown"
+    
+    return MANGA_STATUS.get(status.lower(), status.capitalize())
+
+
+def get_readable_content_rating(rating: Optional[str]) -> str:
+    """Convert content rating code to readable rating.
+    
+    Args:
+        rating: The content rating code to convert.
+        
+    Returns:
+        A human-readable content rating.
+    """
+    if not rating:
+        return "Unknown"
+    
+    return CONTENT_RATING.get(rating.lower(), rating.capitalize())
+
 
 def sanitize_filename(filename: str) -> str:
     """Remove invalid characters from a filename.

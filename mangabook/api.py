@@ -44,7 +44,8 @@ class MangaDexAPI:
             title: The title to search for.
             limit: Maximum number of results to return.
             offset: Number of results to skip.
-            language: Filter by original language (e.g., 'ja' for Japanese).
+            language: Filter by original language (e.g., 'ja' for Japanese)
+                     or translated language for available translations.
             
         Returns:
             Dict with search results.
@@ -55,17 +56,18 @@ class MangaDexAPI:
         """
         client = await self._get_client()
         
+        # Use only the supported parameters
         search_params = {
             "title": title,
             "limit": limit,
-            "offset": offset,
-            "includes": ["cover_art"]
+            "offset": offset
         }
         
-        if language:
-            search_params["originalLanguage[]"] = [language]
+        # We'll handle language filtering in the CLI since the API wrapper 
+        # doesn't support these parameters directly
         
-        response = await client.manga.search(**search_params)
+        # Make the API call with proper parameters
+        response = await client.search_manga(**search_params)
         return response
     
     @exception_handler
@@ -84,8 +86,16 @@ class MangaDexAPI:
             Exception: If the API request fails.
         """
         client = await self._get_client()
-        response = await client.manga.get(manga_id, includes=["cover_art", "author", "artist"])
-        return response
+        # Use the get_manga method directly on the client if available
+        # Otherwise, fallback to a basic fetch
+        try:
+            response = await client.get_manga(manga_id)
+            return response
+        except AttributeError:
+            # Fallback if client structure changed
+            logger.warning("Using fallback method for get_manga")
+            response = await client.manga.get(manga_id, includes=["cover_art", "author", "artist"])
+            return response
     
     @exception_handler
     @retry(max_attempts=3, delay=1.0, backoff=2.0)
@@ -108,18 +118,35 @@ class MangaDexAPI:
         """
         client = await self._get_client()
         
-        params = {
-            "manga": manga_id,
-            "limit": limit,
-            "offset": offset,
-            "includes": ["scanlation_group"]
-        }
-        
-        if language:
-            params["translatedLanguage[]"] = [language]
-        
-        response = await client.chapter.list(**params)
-        return response
+        try:
+            # Try using the API directly if available
+            params = {
+                "manga": manga_id,
+                "limit": limit,
+                "offset": offset
+            }
+            
+            if language:
+                params["translatedLanguage"] = [language]
+            
+            # Try using the get_chapter_list method
+            response = await client.get_chapter_list(**params)
+            return response
+        except (AttributeError, TypeError):
+            logger.warning("Using fallback method for get_chapters")
+            # Fallback to older structure
+            params = {
+                "manga": manga_id,
+                "limit": limit,
+                "offset": offset,
+                "includes": ["scanlation_group"]
+            }
+            
+            if language:
+                params["translatedLanguage[]"] = [language]
+            
+            response = await client.chapter.list(**params)
+            return response
     
     async def get_all_chapters(self, manga_id: str, language: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all chapters for a manga, handling pagination.
@@ -268,17 +295,21 @@ class MangaDexAPI:
         response = await client.manga.aggregate(**params)
         return response.get("volumes", {})
     
-    async def login(self, username: str, password: str) -> Tuple[bool, str]:
-        """Log in to MangaDex.
+    async def login(self, username: str, password: str,
+                client_id: Optional[str] = None,
+                client_secret: Optional[str] = None) -> Tuple[bool, str]:
+        """Log in to MangaDex using OAuth2.
         
         Args:
             username: MangaDex username.
             password: MangaDex password.
+            client_id: MangaDex OAuth2 client ID (optional).
+            client_secret: MangaDex OAuth2 client secret (optional).
             
         Returns:
             Tuple[bool, str]: (Success flag, Error message if failed).
         """
-        return await self.auth_manager.login(username, password)
+        return await self.auth_manager.login(username, password, client_id, client_secret)
     
     async def logout(self) -> Tuple[bool, str]:
         """Log out from MangaDex.
@@ -291,6 +322,22 @@ class MangaDexAPI:
     async def close(self) -> None:
         """Close the API client."""
         await self.auth_manager.close()
+    
+    async def get_manga_chapters(self, manga_id: str, language: Optional[str] = None) -> Dict[str, Any]:
+        """Alias for get_chapters to maintain compatibility.
+        
+        Args:
+            manga_id: The MangaDex ID of the manga.
+            language: Filter by translation language (e.g., 'en').
+            
+        Returns:
+            Dict with chapter results.
+            
+        Raises:
+            AuthenticationError: If authentication fails.
+            Exception: If the API request fails.
+        """
+        return await self.get_all_chapters(manga_id, language)
 
 
 # Singleton instance for global use

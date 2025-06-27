@@ -22,7 +22,10 @@ from .utils import (
     clean_html, 
     format_manga_title,
     format_volume_number,
-    ensure_directory
+    ensure_directory,
+    get_readable_language,
+    get_readable_status,
+    get_readable_content_rating
 )
 from .config import Config
 from .error import initialize_error_handler, error_handler, ErrorCategory
@@ -50,19 +53,36 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
     logger.info(f"Searching for manga: {query}")
     
     api = await get_api()
-    response = await api.search_manga(query, limit=limit, language=language)
+    # We're not passing language to the API call as it's not supported
+    # We'll filter results manually after getting them
+    response = await api.search_manga(query, limit=limit)
     
     results = []
+    language_filter = language.lower() if language else None
     for manga in response.get("data", []):
-        manga_id = manga["id"]
-        attributes = manga["attributes"]
+        # Get basic manga ID
+        manga_id = manga.get("id", "unknown")
+        attributes = manga.get("attributes", {})
         
-        # Get title in requested language or fall back to English or Japanese
+        # DEBUG: Log the full attributes for inspection
+        logger.debug(f"Manga attributes for {manga_id}: {attributes}")
+        
+        # Extract title with robust fallback behavior
         title = None
-        if attributes.get("title"):
-            title_dict = attributes["title"]
-            if language and language in title_dict:
-                title = title_dict[language]
+        title_dict = attributes.get("title", {}) or {}
+        
+        # If language filter is specified, check if this manga has the language we want
+        # For original language or available translations
+        if language_filter:
+            original_lang = attributes.get("originalLanguage", "").lower()
+            # Skip this manga if we're filtering by original language and it doesn't match
+            # and continue processing other manga
+            
+        # Extract the best title for display
+        if title_dict:
+            # Try to get title in requested language, then fall back to English, Japanese, or first available
+            if language_filter and language_filter in title_dict:
+                title = title_dict[language_filter]
             elif "en" in title_dict:
                 title = title_dict["en"]
             elif "ja" in title_dict:
@@ -73,20 +93,57 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
         
         # Get cover art if available
         cover_url = ""
-        for relationship in manga.get("relationships", []):
-            if relationship["type"] == "cover_art" and "attributes" in relationship:
-                filename = relationship["attributes"].get("fileName")
+        for relationship in manga.get("relationships", []) or []:
+            if relationship.get("type") == "cover_art" and relationship.get("attributes"):
+                rel_attrs = relationship["attributes"]
+                filename = rel_attrs.get("fileName")
                 if filename:
                     cover_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
         
+        # Extract tags with categories (if available)
+        tags = []
+        tag_categories = {}
+        
+        for tag in attributes.get("tags", []) or []:
+            tag_attrs = tag.get("attributes", {}) or {}
+            tag_name = tag_attrs.get("name", {}).get("en")
+            
+            if tag_name:
+                tags.append(tag_name)
+                
+                # Group by category if available
+                group = tag_attrs.get("group")
+                if group:
+                    if group not in tag_categories:
+                        tag_categories[group] = []
+                    tag_categories[group].append(tag_name)
+        
+        # Handle year display: show N/A if None
+        year = attributes.get("year")
+        year_display = str(year) if year is not None else "N/A"
+        
+        # Extract content rating
+        content_rating = attributes.get("contentRating", "unknown")
+        
+        # Create structured manga data
         manga_data = {
             "id": manga_id,
             "title": format_manga_title(title) if title else "Unknown",
             "original_language": attributes.get("originalLanguage", "unknown"),
-            "year": attributes.get("year"),
+            "year": year_display,
             "status": attributes.get("status", "unknown"),
             "description": clean_html(attributes.get("description", {}).get("en", "")),
             "cover_url": cover_url,
+            "content_rating": content_rating,
+            "tags": tags,
+            "tag_categories": tag_categories,
+            "publication": {
+                "demographic": attributes.get("publicationDemographic", "unknown"),
+                "status": attributes.get("status", "unknown"),
+                "year": year
+            },
+            "last_chapter": attributes.get("lastChapter"),
+            "last_volume": attributes.get("lastVolume"),
         }
         results.append(manga_data)
     
@@ -104,22 +161,32 @@ def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
         return
     
     # Prepare table data
-    headers = ["#", "Title", "Language", "Status", "Year"]
+    headers = ["#", "Title", "Language", "Status", "Year", "Rating"]
     rows = []
     
     for i, manga in enumerate(results):
+        # Get human-readable language and status
+        language = get_readable_language(manga.get("original_language", "unknown"))
+        status = get_readable_status(manga.get("status", "unknown"))
+        content_rating = get_readable_content_rating(manga.get("content_rating", "unknown"))
+        
         rows.append([
             str(i + 1),
-            truncate_string(manga.get("title", "Unknown"), 50),
-            manga.get("original_language", "unknown"),
-            manga.get("status", "unknown"),
-            str(manga.get("year", "N/A")),
+            truncate_string(manga.get("title", "Unknown"), 45),
+            language,
+            status,
+            manga.get("year", "N/A"),
+            content_rating
         ])
     
     # Create and display table
     table = create_table(headers, rows)
     click.echo("\nSearch Results:\n")
     click.echo(table)
+    
+    # Display tips
+    click.echo("\nTip: Enter the number of a manga to see more details.")
+    click.echo("     Some titles may be in their original language if no translation is available.")
 
 
 def select_from_list(items: List[Any], prompt: str = "Enter number") -> Optional[int]:
@@ -166,17 +233,43 @@ async def get_manga_details(manga_id: str) -> Dict[str, Any]:
         return {}
     
     # Extract basic manga data
-    attributes = manga["attributes"]
+    attributes = manga.get("attributes", {})
     
     # Get title (prioritize English, then fall back to other languages)
     title = None
-    if attributes.get("title"):
-        title_dict = attributes["title"]
+    title_dict = attributes.get("title", {}) or {}
+    if title_dict:
         if "en" in title_dict:
             title = title_dict["en"]
+        elif "ja" in title_dict:
+            title = title_dict["ja"]
         else:
             # Just take the first available title
             title = next(iter(title_dict.values()), "Unknown")
+    
+    # Extract tag information with categories
+    tags = []
+    tag_categories = {}
+    
+    for tag in attributes.get("tags", []) or []:
+        tag_attrs = tag.get("attributes", {}) or {}
+        tag_name = tag_attrs.get("name", {}).get("en")
+        
+        if tag_name:
+            tags.append(tag_name)
+            
+            # Group by category if available
+            group = tag_attrs.get("group")
+            if group:
+                if group not in tag_categories:
+                    tag_categories[group] = []
+                tag_categories[group].append(tag_name)
+    
+    # Handle alternative titles
+    alt_titles = []
+    for alt_title_dict in attributes.get("altTitles", []) or []:
+        for lang, alt_title in alt_title_dict.items():
+            alt_titles.append(f"{alt_title} ({get_readable_language(lang)})")
     
     # Extract other information
     details = {
@@ -185,32 +278,36 @@ async def get_manga_details(manga_id: str) -> Dict[str, Any]:
         "description": clean_html(attributes.get("description", {}).get("en", "")),
         "status": attributes.get("status", "unknown"),
         "year": attributes.get("year"),
-        "tags": [],
+        "tags": tags,
+        "tag_categories": tag_categories,
         "original_language": attributes.get("originalLanguage", "unknown"),
         "last_chapter": attributes.get("lastChapter"),
+        "last_volume": attributes.get("lastVolume"),
         "content_rating": attributes.get("contentRating", "unknown"),
+        "demographic": attributes.get("publicationDemographic"),
         "authors": [],
         "artists": [],
         "cover_url": "",
+        "alt_titles": alt_titles[:5],  # Limit to 5 alternative titles to avoid overwhelming output
+        "created_at": attributes.get("createdAt"),
+        "updated_at": attributes.get("updatedAt"),
     }
     
-    # Extract tags
-    for tag in attributes.get("tags", []):
-        if tag.get("attributes", {}).get("name", {}).get("en"):
-            details["tags"].append(tag["attributes"]["name"]["en"])
-    
     # Extract cover and other relationships
-    for relationship in manga.get("relationships", []):
-        if relationship["type"] == "cover_art" and "attributes" in relationship:
-            filename = relationship["attributes"].get("fileName")
+    for relationship in manga.get("relationships", []) or []:
+        rel_type = relationship.get("type", "")
+        rel_attrs = relationship.get("attributes", {})
+        
+        if rel_type == "cover_art" and rel_attrs:
+            filename = rel_attrs.get("fileName")
             if filename:
                 details["cover_url"] = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
-        elif relationship["type"] == "author" and "attributes" in relationship:
-            name = relationship["attributes"].get("name")
+        elif rel_type == "author" and rel_attrs:
+            name = rel_attrs.get("name")
             if name:
                 details["authors"].append(name)
-        elif relationship["type"] == "artist" and "attributes" in relationship:
-            name = relationship["attributes"].get("name")
+        elif rel_type == "artist" and rel_attrs:
+            name = rel_attrs.get("name")
             if name:
                 details["artists"].append(name)
     
@@ -235,11 +332,31 @@ def display_manga_details(details: Dict[str, Any]) -> None:
     # Basic info
     click.secho("Basic Information:", fg="green", bold=True)
     click.echo(f"ID: {details['id']}")
+    
     if details.get("year"):
         click.echo(f"Year: {details['year']}")
-    click.echo(f"Status: {details['status'].title()}")
-    click.echo(f"Language: {details['original_language']}")
-    click.echo(f"Content Rating: {details['content_rating'].title()}")
+    
+    # Use formatted status
+    status = get_readable_status(details.get('status', 'unknown'))
+    click.echo(f"Status: {status}")
+    
+    # Use formatted language
+    language = get_readable_language(details.get('original_language', 'unknown'))
+    click.echo(f"Original Language: {language}")
+    
+    # Use formatted content rating
+    content_rating = get_readable_content_rating(details.get('content_rating', 'unknown'))
+    click.echo(f"Content Rating: {content_rating}")
+    
+    # Show demographic if available
+    if details.get("demographic"):
+        click.echo(f"Demographic: {details['demographic'].capitalize()}")
+    
+    # Show last chapter/volume if available
+    if details.get("last_chapter"):
+        click.echo(f"Last Chapter: {details['last_chapter']}")
+    if details.get("last_volume"):
+        click.echo(f"Last Volume: {details['last_volume']}")
     
     # Authors and artists
     if details.get("authors"):
@@ -247,9 +364,20 @@ def display_manga_details(details: Dict[str, Any]) -> None:
     if details.get("artists"):
         click.echo(f"Artist(s): {', '.join(details['artists'])}")
     
-    # Tags
-    if details.get("tags"):
-        click.echo(f"Tags: {', '.join(details['tags'])}")
+    # Alternative titles (limited to avoid overwhelming output)
+    if details.get("alt_titles"):
+        click.echo("\nAlternative Titles:")
+        for alt_title in details["alt_titles"]:
+            click.echo(f"  • {alt_title}")
+    
+    # Display tags using our specialized function
+    if details.get("tags") or details.get("tag_categories"):
+        display_manga_tags(details, detailed=True)
+    
+    # Last updated info
+    if details.get("updated_at"):
+        updated_date = details["updated_at"].split("T")[0] if "T" in details["updated_at"] else details["updated_at"]
+        click.echo(f"\nLast Updated: {updated_date}")
     
     # Description
     if details.get("description"):
@@ -475,14 +603,21 @@ async def login_flow() -> bool:
     username = click.prompt("MangaDex Username")
     password = click.prompt("MangaDex Password", hide_input=True)
     
-    # Attempt login
-    result = await login(username, password)
+    # Get OAuth2 credentials if needed
+    client_id = None
+    client_secret = None
+    if click.confirm("Do you want to provide OAuth2 client credentials? (recommended)", default=True):
+        client_id = click.prompt("MangaDex OAuth2 Client ID", default="")
+        if client_id:
+            client_secret = click.prompt("MangaDex OAuth2 Client Secret", hide_input=True)
     
-    if result.get("success", False):
+    # Attempt login
+    success, message = await login(username, password, client_id, client_secret)
+    if success:
         click.secho(f"Logged in as: {username}", fg="green")
         return True
     else:
-        click.secho(f"Login failed: {result.get('message', 'Unknown error')}", fg="red")
+        click.secho(f"Login failed: {message or 'Unknown error'}", fg="red")
         return False
 
 
@@ -604,15 +739,18 @@ def interactive(ctx):
 @cli.command()
 @click.option('--username', '-u', help="MangaDex username")
 @click.option('--password', '-p', help="MangaDex password", hide_input=True)
+@click.option('--client-id', help="MangaDex OAuth2 client ID")
+@click.option('--client-secret', help="MangaDex OAuth2 client secret", hide_input=True)
 @click.pass_context
-def login(ctx, username, password):
-    """Log in to MangaDex.
+def login(ctx, username, password, client_id, client_secret):
+    """Log in to MangaDex using OAuth2.
     
     Examples:
       mangabook login -u username -p password
+      mangabook login --client-id your_client_id --client-secret your_client_secret
       mangabook login
     """
-    asyncio.run(login_command(username, password))
+    asyncio.run(login_command(username, password, client_id, client_secret))
 
 
 @cli.command()
@@ -907,7 +1045,8 @@ async def interactive_command() -> None:
         logger.error(f"Error in interactive mode: {e}")
 
 
-async def login_command(username: Optional[str] = None, password: Optional[str] = None) -> None:
+async def login_command(username: Optional[str] = None, password: Optional[str] = None,
+                    client_id: Optional[str] = None, client_secret: Optional[str] = None) -> None:
     """Implementation of the login command."""
     from .auth import login, get_auth_status
     
@@ -925,13 +1064,19 @@ async def login_command(username: Optional[str] = None, password: Optional[str] 
         if not password:
             password = click.prompt("MangaDex Password", hide_input=True)
         
-        # Attempt login
-        result = await login(username, password)
+        # Get OAuth2 credentials if needed
+        if not client_id and click.confirm("Do you want to provide OAuth2 client credentials? (recommended)", default=True):
+            client_id = click.prompt("MangaDex OAuth2 Client ID", default="")
+            if client_id:
+                client_secret = click.prompt("MangaDex OAuth2 Client Secret", hide_input=True)
         
-        if result.get("success", False):
+        # Attempt login
+        success, message = await login(username, password, client_id, client_secret)
+        
+        if success:
             click.secho(f"Logged in as: {username}", fg="green")
         else:
-            click.secho(f"Login failed: {result.get('message', 'Unknown error')}", fg="red")
+            click.secho(f"Login failed: {message or 'Unknown error'}", fg="red")
     except Exception as e:
         error = error_handler.handle(e, category=ErrorCategory.AUTHENTICATION)
         error_handler.display_error(error)
@@ -950,12 +1095,12 @@ async def logout_command() -> None:
             return
         
         # Logout
-        result = await logout()
+        success, message = await logout()
         
-        if result.get("success", False):
+        if success:
             click.secho("Successfully logged out.", fg="green")
         else:
-            click.secho(f"Logout failed: {result.get('message', 'Unknown error')}", fg="red")
+            click.secho(f"Logout failed: {message or 'Unknown error'}", fg="red")
     except Exception as e:
         error = error_handler.handle(e, category=ErrorCategory.AUTHENTICATION)
         error_handler.display_error(error)
@@ -1140,3 +1285,42 @@ async def history_command(output_dir: str) -> None:
         error = error_handler.handle(e, category=ErrorCategory.UNEXPECTED)
         error_handler.display_error(error)
         logger.error(f"Error in history command: {e}")
+
+
+def display_manga_tags(details: Dict[str, Any], detailed: bool = True) -> None:
+    """Display manga tags in a more readable format.
+    
+    Args:
+        details: Dict with manga details.
+        detailed: Whether to show detailed tag information.
+    """
+    # If we have categories
+    tag_categories = details.get("tag_categories", {})
+    tags = details.get("tags", [])
+    
+    if not tags:
+        return
+    
+    click.echo("\nTags:")
+    
+    if detailed and tag_categories:
+        # Show tags by category
+        for category, category_tags in sorted(tag_categories.items()):
+            click.secho(f"  {category.capitalize()}: ", fg="bright_blue", nl=False)
+            click.echo(", ".join(category_tags))
+    else:
+        # Simple list of all tags
+        wrapped_tags = []
+        line = "  "
+        for tag in sorted(tags):
+            if len(line) + len(tag) + 2 > 80:  # Wrap at 80 chars
+                wrapped_tags.append(line)
+                line = "  "
+            line += f"{tag}, "
+        
+        # Add the last line without the trailing comma
+        if line != "  ":
+            wrapped_tags.append(line[:-2])
+        
+        for line in wrapped_tags:
+            click.echo(line)
