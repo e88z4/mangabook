@@ -72,6 +72,9 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         "started_at": str(start_time),
     }
     
+    # Get the API instance for later use
+    api = await get_api()
+    
     try:
         # Step 1: Create output directory
         output_dir = Path(output_dir)
@@ -88,7 +91,8 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
             output_dir=str(output_dir), 
             keep_raw=keep_raw,
             max_concurrent=5,  # 5 concurrent chapter downloads
-            use_cache=True     # Use API response caching
+            use_cache=True,    # Use API response caching
+            api=api            # Pass the same API instance to avoid resource duplication
         )
         
         await error_handler.safe_execute_async(
@@ -343,6 +347,13 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         elapsed_time = end_time - start_time
         results["completed_at"] = str(end_time)
         results["elapsed_seconds"] = elapsed_time.total_seconds()
+        
+        return results
+    
+    finally:
+        # Always ensure resources are properly cleaned up
+        if 'downloader' in locals():
+            await downloader.close()
         
         return {
             **results,

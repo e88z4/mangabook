@@ -364,55 +364,59 @@ async def batch_download(manga_ids: List[str], output_dir: Optional[str] = None,
     
     print_header(f"Batch Download ({len(manga_ids)} manga)", width=60)
     
-    for manga_id in manga_ids:
-        try:
-            # Get manga details
-            manga = await api.get_manga(manga_id)
-            if not manga:
-                print_error(f"Failed to get manga {manga_id}")
+    try:
+        for manga_id in manga_ids:
+            try:
+                # Get manga details
+                manga = await api.get_manga(manga_id)
+                if not manga:
+                    print_error(f"Failed to get manga {manga_id}")
+                    results["failed"] += 1
+                    results["manga"][manga_id] = {"success": False, "error": "Manga not found"}
+                    continue
+                
+                # Get manga title
+                title = manga["attributes"].get("title", {}).get("en") or list(manga["attributes"].get("title", {}).values())[0]
+                print_manga_title(title)
+                
+                # Get volumes to download
+                manga_volumes = volumes.get(manga_id) if volumes else None
+                
+                if not manga_volumes:
+                    # Get all volumes
+                    all_volumes = await api.get_manga_volumes(manga_id)
+                    manga_volumes = list(all_volumes.keys())
+                
+                print_info(f"Downloading volumes: {', '.join(manga_volumes)}")
+                
+                # Add to download queue
+                job = download_queue.add_job(
+                    manga_id=manga_id,
+                    manga_title=title,
+                    volumes=manga_volumes,
+                    output_dir=output_dir,
+                    keep_raw=keep_raw,
+                    quality=quality,
+                    kobo=kobo
+                )
+                
+                results["manga"][manga_id] = {
+                    "success": True,
+                    "job_id": job["id"],
+                    "volumes": manga_volumes
+                }
+                
+                results["successful"] += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to add manga {manga_id} to queue: {e}")
                 results["failed"] += 1
-                results["manga"][manga_id] = {"success": False, "error": "Manga not found"}
-                continue
-            
-            # Get manga title
-            title = manga["attributes"].get("title", {}).get("en") or list(manga["attributes"].get("title", {}).values())[0]
-            print_manga_title(title)
-            
-            # Get volumes to download
-            manga_volumes = volumes.get(manga_id) if volumes else None
-            
-            if not manga_volumes:
-                # Get all volumes
-                all_volumes = await api.get_manga_volumes(manga_id)
-                manga_volumes = list(all_volumes.keys())
-            
-            print_info(f"Downloading volumes: {', '.join(manga_volumes)}")
-            
-            # Add to download queue
-            job = download_queue.add_job(
-                manga_id=manga_id,
-                manga_title=title,
-                volumes=manga_volumes,
-                output_dir=output_dir,
-                keep_raw=keep_raw,
-                quality=quality,
-                kobo=kobo
-            )
-            
-            results["manga"][manga_id] = {
-                "success": True,
-                "job_id": job["id"],
-                "volumes": manga_volumes
-            }
-            
-            results["successful"] += 1
-            
-        except Exception as e:
-            logger.error(f"Failed to add manga {manga_id} to queue: {e}")
-            results["failed"] += 1
-            results["manga"][manga_id] = {"success": False, "error": str(e)}
-    
-    print_info(f"Added {results['successful']} manga to download queue")
-    print_info(f"Use 'mangabook queue process' to start processing the queue")
-    
-    return results
+                results["manga"][manga_id] = {"success": False, "error": str(e)}
+        
+        print_info(f"Added {results['successful']} manga to download queue")
+        print_info(f"Use 'mangabook queue process' to start processing the queue")
+        
+        return results
+    finally:
+        # Ensure API resources are properly closed
+        await api.close()

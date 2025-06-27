@@ -50,47 +50,50 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
     logger.info(f"Searching for manga: {query}")
     
     api = await get_api()
-    response = await api.search_manga(query, limit=limit, language=language)
-    
-    results = []
-    for manga in response.get("data", []):
-        manga_id = manga["id"]
-        attributes = manga["attributes"]
+    try:
+        response = await api.search_manga(query, limit=limit, language=language)
         
-        # Get title in requested language or fall back to English or Japanese
-        title = None
-        if attributes.get("title"):
-            title_dict = attributes["title"]
-            if language and language in title_dict:
-                title = title_dict[language]
-            elif "en" in title_dict:
-                title = title_dict["en"]
-            elif "ja" in title_dict:
-                title = title_dict["ja"]
-            else:
-                # Just take the first available title
-                title = next(iter(title_dict.values()), "Unknown")
+        results = []
+        for manga in response.get("data", []):
+            manga_id = manga["id"]
+            attributes = manga["attributes"]
+            
+            # Get title in requested language or fall back to English or Japanese
+            title = None
+            if attributes.get("title"):
+                title_dict = attributes["title"]
+                if language and language in title_dict:
+                    title = title_dict[language]
+                elif "en" in title_dict:
+                    title = title_dict["en"]
+                elif "ja" in title_dict:
+                    title = title_dict["ja"]
+                else:
+                    # Just take the first available title
+                    title = next(iter(title_dict.values()), "Unknown")
+            
+            # Get cover art if available
+            cover_url = ""
+            for relationship in manga.get("relationships", []):
+                if relationship["type"] == "cover_art" and "attributes" in relationship:
+                    filename = relationship["attributes"].get("fileName")
+                    if filename:
+                        cover_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
+            
+            manga_data = {
+                "id": manga_id,
+                "title": format_manga_title(title) if title else "Unknown",
+                "original_language": attributes.get("originalLanguage", "unknown"),
+                "year": attributes.get("year"),
+                "status": attributes.get("status", "unknown"),
+                "description": clean_html(attributes.get("description", {}).get("en", "")),
+                "cover_url": cover_url,
+            }
+            results.append(manga_data)
         
-        # Get cover art if available
-        cover_url = ""
-        for relationship in manga.get("relationships", []):
-            if relationship["type"] == "cover_art" and "attributes" in relationship:
-                filename = relationship["attributes"].get("fileName")
-                if filename:
-                    cover_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
-        
-        manga_data = {
-            "id": manga_id,
-            "title": format_manga_title(title) if title else "Unknown",
-            "original_language": attributes.get("originalLanguage", "unknown"),
-            "year": attributes.get("year"),
-            "status": attributes.get("status", "unknown"),
-            "description": clean_html(attributes.get("description", {}).get("en", "")),
-            "cover_url": cover_url,
-        }
-        results.append(manga_data)
-    
-    return results
+        return results
+    finally:
+        await api.close()
 
 
 def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
@@ -104,7 +107,7 @@ def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
         return
     
     # Prepare table data
-    headers = ["#", "Title", "Language", "Status", "Year"]
+    headers = ["#", "Title", "Language", "Status", "Year", "ID"]
     rows = []
     
     for i, manga in enumerate(results):
@@ -114,6 +117,7 @@ def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
             manga.get("original_language", "unknown"),
             manga.get("status", "unknown"),
             str(manga.get("year", "N/A")),
+            manga.get("id", "N/A"),
         ])
     
     # Create and display table
@@ -160,61 +164,82 @@ async def get_manga_details(manga_id: str) -> Dict[str, Any]:
     logger.info(f"Getting manga details: {manga_id}")
     
     api = await get_api()
-    manga = await api.get_manga(manga_id)
-    
-    if not manga:
-        return {}
-    
-    # Extract basic manga data
-    attributes = manga["attributes"]
-    
-    # Get title (prioritize English, then fall back to other languages)
-    title = None
-    if attributes.get("title"):
-        title_dict = attributes["title"]
-        if "en" in title_dict:
-            title = title_dict["en"]
-        else:
-            # Just take the first available title
-            title = next(iter(title_dict.values()), "Unknown")
-    
-    # Extract other information
-    details = {
-        "id": manga_id,
-        "title": format_manga_title(title) if title else "Unknown",
-        "description": clean_html(attributes.get("description", {}).get("en", "")),
-        "status": attributes.get("status", "unknown"),
-        "year": attributes.get("year"),
-        "tags": [],
-        "original_language": attributes.get("originalLanguage", "unknown"),
-        "last_chapter": attributes.get("lastChapter"),
-        "content_rating": attributes.get("contentRating", "unknown"),
-        "authors": [],
-        "artists": [],
-        "cover_url": "",
-    }
-    
-    # Extract tags
-    for tag in attributes.get("tags", []):
-        if tag.get("attributes", {}).get("name", {}).get("en"):
-            details["tags"].append(tag["attributes"]["name"]["en"])
-    
-    # Extract cover and other relationships
-    for relationship in manga.get("relationships", []):
-        if relationship["type"] == "cover_art" and "attributes" in relationship:
-            filename = relationship["attributes"].get("fileName")
-            if filename:
-                details["cover_url"] = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
-        elif relationship["type"] == "author" and "attributes" in relationship:
-            name = relationship["attributes"].get("name")
-            if name:
-                details["authors"].append(name)
-        elif relationship["type"] == "artist" and "attributes" in relationship:
-            name = relationship["attributes"].get("name")
-            if name:
-                details["artists"].append(name)
-    
-    return details
+    try:
+        manga = await api.get_manga(manga_id)
+        
+        if not manga:
+            return {}
+        
+        # Debug: Print the structure of the manga response
+        logger.debug(f"Manga response keys: {manga.keys()}")
+        if 'data' in manga:
+            logger.debug("Using 'data' field in response")
+            manga = manga['data']
+            if not manga:
+                return {}
+            logger.debug(f"Manga data keys: {manga.keys()}")
+        
+        # Check if attributes exists
+        if 'attributes' not in manga:
+            logger.error(f"'attributes' not found in manga data: {manga}")
+            return {
+                "id": manga_id,
+                "title": "Unknown",
+                "error": "Invalid API response structure"
+            }
+        
+        # Extract basic manga data
+        attributes = manga["attributes"]
+        
+        # Get title (prioritize English, then fall back to other languages)
+        title = None
+        if attributes.get("title"):
+            title_dict = attributes["title"]
+            if "en" in title_dict:
+                title = title_dict["en"]
+            else:
+                # Just take the first available title
+                title = next(iter(title_dict.values()), "Unknown")
+        
+        # Extract other information
+        details = {
+            "id": manga_id,
+            "title": format_manga_title(title) if title else "Unknown",
+            "description": clean_html(attributes.get("description", {}).get("en", "")),
+            "status": attributes.get("status", "unknown"),
+            "year": attributes.get("year"),
+            "tags": [],
+            "original_language": attributes.get("originalLanguage", "unknown"),
+            "last_chapter": attributes.get("lastChapter"),
+            "content_rating": attributes.get("contentRating", "unknown"),
+            "authors": [],
+            "artists": [],
+            "cover_url": "",
+        }
+        
+        # Extract tags
+        for tag in attributes.get("tags", []):
+            if tag.get("attributes", {}).get("name", {}).get("en"):
+                details["tags"].append(tag["attributes"]["name"]["en"])
+        
+        # Extract cover and other relationships
+        for relationship in manga.get("relationships", []):
+            if relationship["type"] == "cover_art" and "attributes" in relationship:
+                filename = relationship["attributes"].get("fileName")
+                if filename:
+                    details["cover_url"] = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
+            elif relationship["type"] == "author" and "attributes" in relationship:
+                name = relationship["attributes"].get("name")
+                if name:
+                    details["authors"].append(name)
+            elif relationship["type"] == "artist" and "attributes" in relationship:
+                name = relationship["attributes"].get("name")
+                if name:
+                    details["artists"].append(name)
+        
+        return details
+    finally:
+        await api.close()
 
 
 def display_manga_details(details: Dict[str, Any]) -> None:
@@ -260,59 +285,60 @@ def display_manga_details(details: Dict[str, Any]) -> None:
 
 
 async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str, Any]]:
-    """Get volumes for a manga.
+    """Get volumes and chapters for a manga.
     
     Args:
         manga_id: MangaDex ID of the manga.
-        language: Language code.
+        language: The language code.
         
     Returns:
-        Dict with volume information.
+        Dict mapping volume numbers to chapter information.
     """
     logger.info(f"Getting volumes for manga: {manga_id}")
     
     api = await get_api()
-    chapters = await api.get_manga_chapters(manga_id, language=language)
-    
-    volumes = {}
-    
-    for chapter in chapters.get("data", []):
-        attributes = chapter.get("attributes", {})
-        volume = attributes.get("volume") or "Unknown"
-        chapter_num = attributes.get("chapter") or "Unknown"
+    try:
+        chapters = await api.get_chapters(manga_id, language=language)
         
-        # Initialize volume entry if not exists
-        if volume not in volumes:
-            volumes[volume] = {
-                "chapters": [],
-                "count": 0,
-                "scanlation_groups": set()
-            }
+        volumes = {}
         
-        # Extract scanlation group
-        for relationship in chapter.get("relationships", []):
-            if relationship["type"] == "scanlation_group" and "attributes" in relationship:
-                group_name = relationship["attributes"].get("name", "Unknown Group")
-                volumes[volume]["scanlation_groups"].add(group_name)
+        for chapter in chapters.get("data", []):
+            attributes = chapter.get("attributes", {})
+            volume = attributes.get("volume") or "Unknown"
+            chapter_num = attributes.get("chapter") or "Unknown"
+            
+            # Initialize volume entry if not exists
+            if volume not in volumes:
+                volumes[volume] = {
+                    "chapters": [],
+                    "count": 0,
+                    "scanlation_groups": set()
+                }
+            
+            # Extract scanlation group
+            for relationship in chapter.get("relationships", []):
+                if relationship["type"] == "scanlation_group" and "attributes" in relationship:
+                    group_name = relationship["attributes"].get("name", "Unknown Group")
+                    volumes[volume]["scanlation_groups"].add(group_name)
+            
+            # Add chapter
+            volumes[volume]["chapters"].append({
+                "id": chapter["id"],
+                "number": chapter_num,
+                "title": attributes.get("title", ""),
+                "pages": attributes.get("pages", 0)
+            })
+            volumes[volume]["count"] += 1
         
-        # Add chapter
-        volumes[volume]["chapters"].append({
-            "id": chapter["id"],
-            "number": chapter_num,
-            "title": attributes.get("title", ""),
-            "pages": attributes.get("pages", 0)
-        })
-        volumes[volume]["count"] += 1
-    
-    # Sort chapters within each volume numerically
-    for volume_data in volumes.values():
-        volume_data["chapters"].sort(
-            key=lambda c: float(c["number"]) if c["number"].replace(".", "").isdigit() else float("inf")
-        )
-        # Convert set to list for easier handling
-        volume_data["scanlation_groups"] = list(volume_data["scanlation_groups"])
-    
-    return volumes
+        # Sort chapters within each volume numerically
+        for volume_data in volumes.values():
+            volume_data["chapters"].sort(
+                key=lambda c: float(c["number"]) if c["number"].replace(".", "").isdigit() else float("inf")
+            )
+        
+        return volumes
+    finally:
+        await api.close()
 
 
 def display_volumes(volumes: Dict[str, Dict[str, Any]]) -> None:
@@ -809,6 +835,7 @@ async def download_command(manga_id: str, volumes: Optional[str], language: str,
 
 async def interactive_command() -> None:
     """Implementation of the interactive command."""
+    api = None
     try:
         click.echo("=" * 60)
         click.secho("Welcome to MangaBook Interactive Mode!", fg="bright_blue", bold=True)
@@ -914,7 +941,11 @@ async def interactive_command() -> None:
     except Exception as e:
         error = error_handler.handle(e, category=ErrorCategory.UNEXPECTED)
         error_handler.display_error(error)
-        logger.error(f"Error in interactive mode: {e}")
+        logger.error(f"Error in interactive command: {e}")
+    finally:
+        # Clean up API resources
+        if api:
+            await api.close()
 
 
 async def login_command(username: Optional[str] = None, password: Optional[str] = None,

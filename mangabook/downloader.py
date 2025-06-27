@@ -65,6 +65,11 @@ class ChapterDownloader:
         """Initialize the downloader with API and HTTP session."""
         if self.api is None:
             self.api = await get_api()
+            # Mark that we created this API instance internally
+            self._api_created_internally = True
+        else:
+            # API was passed in from outside
+            self._api_created_internally = False
         
         if self.session is None:
             self.session = aiohttp.ClientSession()
@@ -75,10 +80,15 @@ class ChapterDownloader:
             self.output_dir = config.get_output_dir()
     
     async def close(self) -> None:
-        """Close the HTTP session."""
+        """Close the HTTP session and API resources."""
         if self.session:
             await self.session.close()
             self.session = None
+            
+        # Only close the API instance if we created it internally
+        # and it's not a shared instance from outside
+        if self.api and hasattr(self, '_api_created_internally') and self._api_created_internally:
+            await self.api.close()
     
     async def get_best_scanlation_group(self, manga_id: str, language: str = "en") -> Optional[str]:
         """Choose the best scanlation group for a manga.
@@ -159,10 +169,16 @@ class ChapterDownloader:
         await self.initialize()
         
         # Get image URLs
-        image_data = await self.api.get_chapter_images(chapter_id, data_saver)
-        
-        if not image_data or not image_data.get("urls"):
-            logger.error(f"No images found for chapter {chapter_id}")
+        try:
+            logger.debug(f"Getting images for chapter: {chapter_id}")
+            image_data = await self.api.get_chapter_images(chapter_id, data_saver)
+            logger.debug(f"Image data: {image_data}")
+            
+            if not image_data or not image_data.get("urls"):
+                logger.error(f"No images found for chapter {chapter_id}")
+                return 0, 0
+        except Exception as e:
+            logger.error(f"Error getting images for chapter {chapter_id}: {e}")
             return 0, 0
         
         output_dir = Path(output_path)

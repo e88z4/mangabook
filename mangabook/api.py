@@ -180,43 +180,53 @@ class MangaDexAPI:
     
     @exception_handler
     @retry(max_attempts=3, delay=1.0, backoff=2.0)
-    async def get_chapter_images(self, chapter_id: str, data_saver: bool = False) -> Dict[str, Any]:
+    async def get_chapter_images(self, chapter_id: str, data_saver: bool = False, timeout: float = 10.0) -> Dict[str, Any]:
         """Get image URLs for a chapter.
         
         Args:
             chapter_id: The MangaDex ID of the chapter.
             data_saver: Use data-saver (compressed) images.
+            timeout: Timeout in seconds for the HTTP request.
             
         Returns:
             Dict with image URLs and other chapter data.
             
         Raises:
             AuthenticationError: If authentication fails.
+            TimeoutError: If the request times out.
             Exception: If the API request fails.
         """
         client = await self._get_client()
         
-        # Build query parameters
-        url = f"/at-home/server/{chapter_id}"
-        
-        # Use direct HTTP request instead of client.at_home.server
-        await client._ensure_session()
-        async with client.session.get(f"{client.base_url}{url}") as response:
-            response_data = await response.json()
-        
-        chapter_hash = response_data["chapter"]["hash"]
-        base_url = response_data["baseUrl"]
-        
-        # Choose between normal quality or data-saver
-        image_quality = "dataSaver" if data_saver else "data"
-        image_filenames = response_data["chapter"][image_quality]
-        
-        # Construct full URLs for each image
-        image_urls = []
-        for filename in image_filenames:
-            quality_path = "data-saver" if data_saver else "data"
-            url = f"{base_url}/{quality_path}/{chapter_hash}/{filename}"
-            image_urls.append(url)
+        logger.debug(f"Getting chapter images for chapter: {chapter_id}")
+        try:
+            # Use the new method added to the client
+            # Wrap with timeout for safety
+            at_home_data = None
+            try:
+                # Set timeout using asyncio.wait_for
+                at_home_data = await asyncio.wait_for(
+                    client.get_chapter_server(chapter_id), 
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Request timed out for chapter {chapter_id}")
+                return {"id": chapter_id, "urls": [], "total": 0}
+                
+            if not at_home_data:
+                logger.error(f"No data received for chapter {chapter_id}")
+                return {"id": chapter_id, "urls": [], "total": 0}
+                
+            logger.debug(f"Response keys: {at_home_data.keys()}")
+            
+            # Use the new helper method to construct image URLs
+            image_urls = client.get_chapter_image_urls(at_home_data, use_data_saver=data_saver)
+            
+            # Extract hash for consistency with the previous implementation
+            chapter_hash = at_home_data["chapter"]["hash"]
+        except Exception as e:
+            logger.error(f"Exception getting chapter images: {e}")
+            return {"id": chapter_id, "urls": [], "total": 0}
         
         return {
             "id": chapter_id,
@@ -353,3 +363,11 @@ async def get_api() -> MangaDexAPI:
     if _api_instance is None:
         _api_instance = MangaDexAPI()
     return _api_instance
+
+
+async def close_global_api() -> None:
+    """Close the global API instance if it exists."""
+    global _api_instance
+    if _api_instance is not None:
+        await _api_instance.close()
+        _api_instance = None

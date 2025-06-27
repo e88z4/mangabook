@@ -196,3 +196,11 @@ cython_debug/
 specification.md
 prompt-plan.md
 todo.md
+
+# Ignore test scripts
+# (All test_*.py scripts are for local/dev use only)
+test_*.py
+
+# Ignore downloaded images and volumes
+downloaded_images/
+downloaded_volume/

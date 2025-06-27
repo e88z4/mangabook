@@ -3,11 +3,13 @@
 import sys
 import logging
 import traceback
+import asyncio
 from pathlib import Path
 import click
 
 from .cli import cli
 from .error import error_handler, ErrorCategory
+from .api import close_global_api
 
 def main():
     """Main entry point with error handling."""
@@ -30,6 +32,14 @@ def main():
         
         # Exit with error code
         sys.exit(1)
+    finally:
+        # Ensure the global API instance is closed
+        try:
+            asyncio.run(close_global_api())
+        except Exception as e:
+            # Don't let API cleanup errors crash the app
+            if error_handler.debug:
+                click.echo(f"Error during API cleanup: {e}")
 
 if __name__ == "__main__":
     # Entry point for MangaBook CLI
