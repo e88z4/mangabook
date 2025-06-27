@@ -198,3 +198,7 @@ class Config:
         output_dir = self.get("output_directory")
         os.makedirs(output_dir, exist_ok=True)
         return output_dir
+    
+    def get_config_dir(self) -> str:
+        """Return the path to the configuration directory."""
+        return str(CONFIG_DIR)

@@ -30,24 +30,16 @@ dependencies = [
     "tqdm>=4.66.1",
     "beautifulsoup4>=4.10.0",
     "aiohttp>=3.8.1",
-    "colorama>=0.4.6",
+    "colorama>=0.4.6"
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/mangabook"
-"Bug Tracker" = "https://github.com/yourusername/mangabook/issues"
-"Documentation" = "https://github.com/yourusername/mangabook#readme"
+Homepage = "https://github.com/yourusername/mangabook"
+BugTracker = "https://github.com/yourusername/mangabook/issues"
+Documentation = "https://github.com/yourusername/mangabook#readme"
 
 [project.scripts]
 mangabook = "mangabook.__main__:main"
 
-[tool.setuptools]
-packages = ["mangabook", "mangabook.epub"]
-package-data = {"mangabook": ["py.typed"]}
-include-package-data = true
-
-[tool.setuptools.package-dir]
-mangabook = "mangabook"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.setuptools.packages.find]
+where = ["."]
