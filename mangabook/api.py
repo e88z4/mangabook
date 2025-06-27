@@ -44,8 +44,7 @@ class MangaDexAPI:
             title: The title to search for.
             limit: Maximum number of results to return.
             offset: Number of results to skip.
-            language: Filter by original language (e.g., 'ja' for Japanese)
-                     or translated language for available translations.
+            language: Filter by original language (e.g., 'ja' for Japanese).
             
         Returns:
             Dict with search results.
@@ -56,19 +55,29 @@ class MangaDexAPI:
         """
         client = await self._get_client()
         
-        # Use only the supported parameters
-        search_params = {
+        # Build query parameters
+        url = "/manga"
+        params = {
             "title": title,
             "limit": limit,
-            "offset": offset
+            "offset": offset,
+            "includes[]": ["cover_art"]
         }
         
-        # We'll handle language filtering in the CLI since the API wrapper 
-        # doesn't support these parameters directly
+        # Only add language filter if explicitly specified
+        if language:
+            params["originalLanguage[]"] = [language]
         
-        # Make the API call with proper parameters
-        response = await client.search_manga(**search_params)
-        return response
+        # Log the request for debugging
+        logger.debug(f"Search request: URL={client.base_url}{url}, params={params}")
+        
+        # Use direct HTTP request instead of client.manga.search
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}", params=params) as response:
+            response_data = await response.json()
+            logger.debug(f"Search response status: {response.status}")
+            logger.debug(f"Search response: {response_data}")
+            return response_data
     
     @exception_handler
     @retry(max_attempts=3, delay=1.0, backoff=2.0)
@@ -86,16 +95,17 @@ class MangaDexAPI:
             Exception: If the API request fails.
         """
         client = await self._get_client()
-        # Use the get_manga method directly on the client if available
-        # Otherwise, fallback to a basic fetch
-        try:
-            response = await client.get_manga(manga_id)
-            return response
-        except AttributeError:
-            # Fallback if client structure changed
-            logger.warning("Using fallback method for get_manga")
-            response = await client.manga.get(manga_id, includes=["cover_art", "author", "artist"])
-            return response
+        
+        # Build query parameters
+        url = f"/manga/{manga_id}"
+        params = {
+            "includes[]": ["cover_art", "author", "artist"]
+        }
+        
+        # Use direct HTTP request instead of client.manga.get
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}", params=params) as response:
+            return await response.json()
     
     @exception_handler
     @retry(max_attempts=3, delay=1.0, backoff=2.0)
@@ -118,35 +128,22 @@ class MangaDexAPI:
         """
         client = await self._get_client()
         
-        try:
-            # Try using the API directly if available
-            params = {
-                "manga": manga_id,
-                "limit": limit,
-                "offset": offset
-            }
-            
-            if language:
-                params["translatedLanguage"] = [language]
-            
-            # Try using the get_chapter_list method
-            response = await client.get_chapter_list(**params)
-            return response
-        except (AttributeError, TypeError):
-            logger.warning("Using fallback method for get_chapters")
-            # Fallback to older structure
-            params = {
-                "manga": manga_id,
-                "limit": limit,
-                "offset": offset,
-                "includes": ["scanlation_group"]
-            }
-            
-            if language:
-                params["translatedLanguage[]"] = [language]
-            
-            response = await client.chapter.list(**params)
-            return response
+        # Build query parameters
+        url = "/chapter"
+        params = {
+            "manga": manga_id,
+            "limit": limit,
+            "offset": offset,
+            "includes[]": ["scanlation_group"]
+        }
+        
+        if language:
+            params["translatedLanguage[]"] = [language]
+        
+        # Use direct HTTP request instead of client.chapter.list
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}", params=params) as response:
+            return await response.json()
     
     async def get_all_chapters(self, manga_id: str, language: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all chapters for a manga, handling pagination.
@@ -198,14 +195,21 @@ class MangaDexAPI:
             Exception: If the API request fails.
         """
         client = await self._get_client()
-        response = await client.at_home.server(chapter_id)
         
-        chapter_hash = response["chapter"]["hash"]
-        base_url = response["baseUrl"]
+        # Build query parameters
+        url = f"/at-home/server/{chapter_id}"
+        
+        # Use direct HTTP request instead of client.at_home.server
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}") as response:
+            response_data = await response.json()
+        
+        chapter_hash = response_data["chapter"]["hash"]
+        base_url = response_data["baseUrl"]
         
         # Choose between normal quality or data-saver
         image_quality = "dataSaver" if data_saver else "data"
-        image_filenames = response["chapter"][image_quality]
+        image_filenames = response_data["chapter"][image_quality]
         
         # Construct full URLs for each image
         image_urls = []
@@ -269,8 +273,14 @@ class MangaDexAPI:
             Exception: If the API request fails.
         """
         client = await self._get_client()
-        response = await client.scanlation_group.get(group_id)
-        return response
+        
+        # Build query parameters
+        url = f"/group/{group_id}"
+        
+        # Use direct HTTP request instead of client.scanlation_group.get
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}") as response:
+            return await response.json()
     
     async def get_manga_volumes(self, manga_id: str, language: Optional[str] = None) -> Dict[str, Any]:
         """Get volume information for a manga.
@@ -288,12 +298,17 @@ class MangaDexAPI:
         """
         client = await self._get_client()
         
-        params = {"manga": manga_id}
+        # Build query parameters
+        url = f"/manga/{manga_id}/aggregate"
+        params = {}
         if language:
             params["translatedLanguage[]"] = [language]
-            
-        response = await client.manga.aggregate(**params)
-        return response.get("volumes", {})
+        
+        # Use direct HTTP request instead of client.manga.aggregate
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}", params=params) as response:
+            response_data = await response.json()
+            return response_data.get("volumes", {})
     
     async def login(self, username: str, password: str,
                 client_id: Optional[str] = None,
@@ -322,22 +337,6 @@ class MangaDexAPI:
     async def close(self) -> None:
         """Close the API client."""
         await self.auth_manager.close()
-    
-    async def get_manga_chapters(self, manga_id: str, language: Optional[str] = None) -> Dict[str, Any]:
-        """Alias for get_chapters to maintain compatibility.
-        
-        Args:
-            manga_id: The MangaDex ID of the manga.
-            language: Filter by translation language (e.g., 'en').
-            
-        Returns:
-            Dict with chapter results.
-            
-        Raises:
-            AuthenticationError: If authentication fails.
-            Exception: If the API request fails.
-        """
-        return await self.get_all_chapters(manga_id, language)
 
 
 # Singleton instance for global use
