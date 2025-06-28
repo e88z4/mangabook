@@ -23,6 +23,7 @@ from .downloader import ChapterDownloader, download_manga_volumes
 from .epub.image import ImageProcessor
 from .epub.builder import EPUBBuilder
 from .epub.kobo import KepubBuilder
+from .epub.enhanced_builder import EnhancedEPUBBuilder, EnhancedKepubBuilder
 from .utils import sanitize_filename, ensure_directory, generate_manga_path, generate_volume_path
 from .error import error_handler, ErrorCategory, MangaBookError
 from .ui import (
@@ -37,8 +38,9 @@ logger = logging.getLogger(__name__)
 
 async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                       output_dir: str, keep_raw: bool = False, quality: int = 85,
-                      kobo: bool = True, language: str = "en", 
-                      validate: bool = True) -> Dict[str, Any]:
+                      kobo: bool = True, use_enhanced_builder: bool = True, language: str = "en", 
+                      validate: bool = True, check_local: bool = True,
+                      force_download: bool = False) -> Dict[str, Any]:
     """Download manga volumes and convert to EPUB.
     
     Args:
@@ -49,8 +51,11 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         keep_raw: Whether to keep raw downloaded files.
         quality: Image quality (1-100).
         kobo: Whether to create Kobo-compatible EPUB.
+        use_enhanced_builder: Whether to use the enhanced builder (recommended for large volumes).
         language: Language code.
         validate: Whether to validate generated EPUBs.
+        check_local: Whether to check for existing files before downloading.
+        force_download: Whether to force download even if local files exist.
         
     Returns:
         Dict with processing results.
@@ -85,6 +90,12 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         print_manga_title(manga_title)
         print_info(f"Manga ID: {manga_id}")
         print_info(f"Volumes: {', '.join(volumes)}")
+        
+        # Print local file options
+        if check_local:
+            print_info("Local file checking: Enabled (will skip valid existing files)")
+        if force_download:
+            print_info("Force download: Enabled (will re-download all files)")
         
         # Step 2: Initialize downloader with parallel capabilities
         downloader = ChapterDownloader(
@@ -122,6 +133,8 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                 manga_title=manga_title,
                 volume_number=volume_number,
                 language=language,
+                check_local=check_local,
+                force_download=force_download,
                 error_category=ErrorCategory.NETWORK,
                 display=True
             )
@@ -153,12 +166,10 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                     split_wide_pages=True
                 )
                 
-                # Process each chapter
+                # Find chapter directories
                 chapter_dirs = [d for d in volume_path.iterdir() if d.is_dir() and d.name.startswith("chapter_")]
-                processed_images = []
-                
-                click.echo(f"Processing {len(chapter_dirs)} chapters...")
-                
+                # Group processed images by chapter
+                chapter_image_map = {}
                 for chapter_dir in chapter_dirs:
                     # Process all images in the chapter
                     processed = error_handler.safe_execute(
@@ -168,20 +179,19 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                         error_category=ErrorCategory.CONVERSION,
                         display=True
                     )
-                    
                     if not processed:
                         results["warnings"].append(f"Failed to process images in {chapter_dir.name}")
                         continue
-                        
-                    # Collect all processed images
+                    # Collect all processed images for this chapter
+                    chapter_image_map[chapter_dir.name] = []
                     for source_file, proc_files in processed.items():
-                        processed_images.extend(proc_files)
-                
-                # Sort the processed images
-                processed_images.sort()
+                        chapter_image_map[chapter_dir.name].extend(proc_files)
+                # Sort chapters by name (which should be in reading order)
+                sorted_chapters = sorted(chapter_image_map.items())
                 
                 # Step 3.3: Create EPUB
-                if processed_images:
+                all_images = [img for _, imgs in sorted_chapters for img in imgs]
+                if all_images:
                     # Get manga details for metadata
                     api = await get_api()
                     manga_data = await api.get_manga(manga_id)
@@ -197,20 +207,32 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                     safe_title = sanitize_filename(vol_title)
                     
                     # Determine cover image (first image)
-                    cover_image = processed_images[0] if processed_images else None
+                    cover_image = all_images[0] if all_images else None
                     
                     # Get reading direction from image processor
                     reading_direction = img_processor.detect_reading_direction(volume_path)
                     
                     # Create EPUB
-                    if kobo:
-                        # Create Kobo EPUB
-                        builder_class = KepubBuilder
-                        epub_ext = ".kepub.epub"
+                    if use_enhanced_builder:
+                        # Use the enhanced builder that handles large manga volumes better
+                        if kobo:
+                            # Create Kobo EPUB with enhanced builder
+                            builder_class = EnhancedKepubBuilder
+                            epub_ext = ".kepub.epub"
+                        else:
+                            # Create standard EPUB with enhanced builder
+                            builder_class = EnhancedEPUBBuilder
+                            epub_ext = ".epub"
                     else:
-                        # Create standard EPUB
-                        builder_class = EPUBBuilder
-                        epub_ext = ".epub"
+                        # Use the original builders
+                        if kobo:
+                            # Create Kobo EPUB
+                            builder_class = KepubBuilder
+                            epub_ext = ".kepub.epub"
+                        else:
+                            # Create standard EPUB
+                            builder_class = EPUBBuilder
+                            epub_ext = ".epub"
                     
                     epub_filename = f"{safe_title}{epub_ext}"
                     
@@ -227,14 +249,14 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                     # Set cover if available
                     if cover_image:
                         builder.set_cover(cover_image)
-                        # Skip the first image in the content if it's used as the cover
-                        content_images = processed_images[1:]
+                        content_images = all_images[1:]
                     else:
-                        content_images = processed_images
+                        content_images = all_images
                     
-                    # Add images
-                    for img in content_images:
-                        builder.add_image(img)
+                    # Add chapters and images
+                    for chapter_name, images in sorted_chapters:
+                        if images:
+                            builder.add_chapter(chapter_name, chapter_name, images)
                     
                     # Write EPUB
                     epub_path = error_handler.safe_execute(
@@ -325,6 +347,20 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         if results["skipped"] > 0:
             print_warning(f"Skipped volumes: {results['skipped']}")
         print_info(f"Total files created: {len(results['epub_files'])}")
+        
+        # Print download statistics if available
+        download_stats = {}
+        for vol_num, vol_result in results.get("volumes", {}).items():
+            if isinstance(vol_result, dict) and "stats" in vol_result:
+                for key, value in vol_result["stats"].items():
+                    download_stats[key] = download_stats.get(key, 0) + value
+        
+        if download_stats:
+            print_header("Download Statistics", width=60)
+            print_info(f"Files downloaded: {download_stats.get('downloaded', 0)}")
+            print_info(f"Files skipped (already valid): {download_stats.get('skipped', 0)}")
+            print_info(f"Files failed: {download_stats.get('failed', 0)}")
+            print_info(f"Download retries: {download_stats.get('retries', 0)}")
         
         # Step 5: Summary
         # Calculate end time

@@ -347,6 +347,23 @@ class MangaDexAPI:
     async def close(self) -> None:
         """Close the API client."""
         await self.auth_manager.close()
+    
+    @exception_handler
+    @retry(max_attempts=3, delay=1.0, backoff=2.0)
+    async def get_group_statistics(self, group_id: str) -> Dict[str, Any]:
+        """Get statistics (including follower count) for a scanlation group.
+        
+        Args:
+            group_id: The MangaDex group ID.
+            
+        Returns:
+            Dict with statistics (including 'follows').
+        """
+        client = await self._get_client()
+        url = f"/statistics/group/{group_id}"
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}") as response:
+            return await response.json()
 
 
 # Singleton instance for global use

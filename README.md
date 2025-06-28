@@ -18,6 +18,16 @@ A Python console application to download manga from MangaDex and create Kobo-com
 - EPUB validation with epubcheck (if available)
 - Comprehensive error handling and recovery
 - Detailed download and conversion summaries with ETA
+- POSIX-compliant filename handling for cross-platform compatibility
+- Robust local file structure with consistent zero-padding
+- Local-first download strategy (skip downloading if valid files exist)
+- JSON manifest tracking for downloaded content with timestamps
+- Update detection for changed or new content
+- Enhanced CLI options for controlling download behavior
+- **NEW:** Enhanced EPUB/KEPUB builder with direct ZIP manipulation for strict EPUB compliance
+- **NEW:** Support for large manga volumes through robust navigation handling
+- **NEW:** Options to use either standard or enhanced builders
+- **NEW:** Proper cover handling and epubcheck validation
 
 ## Requirements
 
@@ -33,6 +43,62 @@ A Python console application to download manga from MangaDex and create Kobo-com
   - colorama>=0.4.6
 - Optional tools:
   - epubcheck (for EPUB validation)
+
+## Advanced Features
+
+### Enhanced EPUB/KEPUB Builder
+
+The application now includes an enhanced EPUB/KEPUB builder that addresses issues with large manga volumes and ensures strict EPUB specification compliance. This builder:
+
+- Uses direct ZIP manipulation to create valid EPUB/KEPUB files
+- Properly handles navigation and TOC for large manga volumes
+- Ensures correct file and folder structure for all e-readers
+- Properly manages image manifests and spine entries
+- Includes Kobo-specific enhancements for optimal reading on Kobo devices
+- Creates valid EPUBs that pass epubcheck validation
+- Uses proper cover handling with correct metadata
+
+The enhanced builder is enabled by default but can be disabled with the `--use-enhanced-builder=False` option if needed.
+
+### Local File Management
+
+MangaBook intelligently checks for existing local files before downloading, avoiding unnecessary downloads and bandwidth usage. This behavior can be controlled with:
+
+- `--check-local`: Check for existing files (default: True)
+- `--force-download`: Force download even if local files exist (default: False)
+
+## Usage
+
+### Command Line Interface
+
+```bash
+# Search for a manga
+mangabook search "Detective Conan"
+
+# Download specific volumes
+mangabook download MANGA_ID --volumes "1-10"
+
+# Download with specific options
+mangabook download MANGA_ID --volumes "1,3,5" --language en --kobo --quality 85 --use-enhanced-builder
+
+# Interactive mode (recommended for beginners)
+mangabook interactive
+```
+
+### Command Line Options
+
+```
+--volumes TEXT       Volumes to download (e.g., "1-10" or "1,3,5")
+--language TEXT      Language code (e.g., "en", "ja")
+--output TEXT        Output directory
+--keep-raw           Keep raw downloaded files
+--quality INTEGER    Image quality (1-100)
+--kobo              Create Kobo-compatible EPUB (default: True)
+--use-enhanced-builder  Use the enhanced builder for more reliable EPUB generation (default: True)
+--no-validate        Skip EPUB validation
+--check-local        Check for valid local files before downloading (default: True)
+--force-download     Force download even if local files exist
+```
 
 ## Installation
 
@@ -74,6 +140,12 @@ mangabook info 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0
 
 # Download manga volumes
 mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1,3-5"
+
+# Download with local file checking (skip downloading files that already exist and are valid)
+mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1,3-5" --check-local
+
+# Force download (ignore existing files)
+mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1,3-5" --force-download
 
 # Start interactive mode
 mangabook interactive

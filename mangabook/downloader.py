@@ -22,8 +22,17 @@ from .utils import (
     sanitize_filename,
     generate_manga_path,
     generate_volume_path,
+    generate_chapter_path,
+    generate_page_path,
+    is_valid_image,
     retry,
-    exception_handler
+    exception_handler,
+    create_volume_manifest,
+    save_manifest,
+    load_manifest,
+    update_manifest_chapter,
+    update_manifest_page,
+    validate_chapter_files
 )
 from .config import Config
 from .parallel import DownloadManager, ApiCache, gather_with_concurrency
@@ -91,38 +100,48 @@ class ChapterDownloader:
             await self.api.close()
     
     async def get_best_scanlation_group(self, manga_id: str, language: str = "en") -> Optional[str]:
-        """Choose the best scanlation group for a manga.
+        """Choose the scanlation group with the highest follower count for a manga.
         
         Args:
             manga_id: MangaDex ID for the manga.
             language: Preferred language for translations.
-            
+        
         Returns:
             ID of the best scanlation group, or None if none found.
         """
         # Get all chapters
         chapters = await self.api.get_all_chapters(manga_id, language)
-        
         if not chapters:
             logger.warning(f"No chapters found for manga {manga_id}")
             return None
         
-        # Count occurrences of each group
-        group_counts = {}
+        # Collect all unique scanlation group IDs
+        group_ids = set()
         for chapter in chapters:
             for relationship in chapter.get("relationships", []):
                 if relationship["type"] == "scanlation_group" and "id" in relationship:
-                    group_id = relationship["id"]
-                    group_counts[group_id] = group_counts.get(group_id, 0) + 1
-        
-        if not group_counts:
+                    group_ids.add(relationship["id"])
+        if not group_ids:
             logger.warning(f"No scanlation groups found for manga {manga_id}")
             return None
         
-        # Find the most frequent group
-        best_group = max(group_counts.items(), key=lambda x: x[1])
-        logger.info(f"Selected scanlation group {best_group[0]} with {best_group[1]} chapters")
-        
+        # Fetch follower counts for all groups
+        # MangaDex API: /statistics/group/{uuid}
+        group_follower_counts = {}
+        for group_id in group_ids:
+            try:
+                stats = await self.api.get_group_statistics(group_id)
+                follower_count = stats.get("statistics", {}).get(group_id, {}).get("follows", 0)
+                group_follower_counts[group_id] = follower_count
+            except Exception as e:
+                logger.warning(f"Failed to fetch stats for group {group_id}: {e}")
+                group_follower_counts[group_id] = 0
+        if not group_follower_counts:
+            logger.warning(f"No follower stats found for scanlation groups of manga {manga_id}")
+            return None
+        # Select group with highest follower count
+        best_group = max(group_follower_counts.items(), key=lambda x: x[1])
+        logger.info(f"Selected scanlation group {best_group[0]} with {best_group[1]} followers")
         return best_group[0]
     
     @retry(max_attempts=3, delay=2.0, backoff=2.0)
@@ -155,18 +174,32 @@ class ChapterDownloader:
             raise  # Let retry decorator handle it
     
     async def download_chapter_images(self, chapter_id: str, output_path: Union[str, Path],
-                                     data_saver: bool = False) -> Tuple[int, int]:
+                                     data_saver: bool = False, 
+                                     check_local: bool = True,
+                                     force_download: bool = False,
+                                     manifest: Optional[Dict[str, Any]] = None) -> Tuple[int, int, Dict[str, Any]]:
         """Download all images for a chapter.
         
         Args:
             chapter_id: MangaDex ID for the chapter.
             output_path: Directory to save images.
             data_saver: Whether to use data-saver images.
+            check_local: Whether to check for existing valid files.
+            force_download: Whether to ignore local files and force download.
+            manifest: Optional manifest to update.
             
         Returns:
-            Tuple[int, int]: (Number of successful downloads, total images)
+            Tuple[int, int, Dict]: (Number of successful downloads, total images, download stats)
         """
         await self.initialize()
+        
+        # Track download statistics
+        stats = {
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "retries": 0
+        }
         
         # Get image URLs
         try:
@@ -176,10 +209,10 @@ class ChapterDownloader:
             
             if not image_data or not image_data.get("urls"):
                 logger.error(f"No images found for chapter {chapter_id}")
-                return 0, 0
+                return 0, 0, stats
         except Exception as e:
             logger.error(f"Error getting images for chapter {chapter_id}: {e}")
-            return 0, 0
+            return 0, 0, stats
         
         output_dir = Path(output_path)
         ensure_directory(output_dir)
@@ -191,32 +224,136 @@ class ChapterDownloader:
         # Create progress bar
         progress = tqdm(total=total, desc=f"Downloading chapter {chapter_id}", unit="img")
         
+        # Initialize chapter data for manifest
+        chapter_data = {
+            "id": chapter_id,
+            "download_timestamp": datetime.now().isoformat(),
+            "status": "incomplete",
+            "pages": {}
+        }
+        
         # Download images
         tasks = []
         for i, url in enumerate(urls):
-            # Create filename with leading zeros for proper sorting
-            filename = f"{i+1:03d}.jpg"  # Assume JPG, we'll handle format detection later
-            path = output_dir / filename
+            page_number = i + 1
             
-            tasks.append(self._download_image(url, path))
-        
-        # Use gather_with_concurrency for parallel downloads
-        results = await gather_with_concurrency(self.max_concurrent, *tasks, 
-                                            show_progress=True, 
-                                            desc=f"Downloading chapter {chapter_id}", 
-                                            unit="img",
-                                            total=len(tasks))
-        
-        successful = sum(1 for result in results if result)
-        
+            # Determine file extension from URL if possible
+            extension = "jpg" # Default
+            if url and '.' in url.split('/')[-1]:
+                possible_ext = url.split('.')[-1].lower()
+                if possible_ext in ["jpg", "jpeg", "png", "gif", "webp"]:
+                    extension = possible_ext
+            
+            # Create standardized filename with proper padding
+            file_path = generate_page_path(output_dir, page_number, extension)
+            
+            # Create page data for manifest
+            page_data = {
+                "page_number": page_number,
+                "file_path": str(file_path),
+                "url": url,
+                "status": "invalid"
+            }
+            
+            # Check if we have a valid local file and should use it
+            file_exists = file_path.exists()
+            file_valid = False
+
+            # Always print debug info for every image file (not just logger)
+            print(f"[PRINT-DEBUG] Checking local file: {file_path} (exists: {file_exists})")
+            if file_exists:
+                file_valid = is_valid_image(file_path)
+                print(f"[PRINT-DEBUG] Local file {file_path} valid: {file_valid}")
+            else:
+                print(f"[PRINT-DEBUG] Local file {file_path} does not exist.")
+
+            if file_exists and file_valid and check_local and not force_download:
+                logger.debug(f"Skipping download of valid local file: {file_path}")
+                page_data["status"] = "valid"
+                page_data["skipped"] = True
+                if manifest:
+                    manifest = update_manifest_page(manifest, chapter_id, page_data)
+                progress.update(1)
+                successful += 1
+                stats["skipped"] += 1
+                continue
+            
+            # If force download or no valid local file, queue download
+            tasks.append((url, file_path, page_number, page_data))
+
+        # Process downloads with retry logic
+        for url, file_path, page_number, page_data in tasks:
+            retry_count = 0
+            max_retries = 3
+            success = False
+            temp_file_path = file_path
+            if not self.keep_raw:
+                # Save to a temp file if not keeping raw
+                temp_file_path = file_path.with_suffix(file_path.suffix + ".tmp")
+            while not success and retry_count < max_retries:
+                try:
+                    result = await self._download_image(url, temp_file_path)
+                    if result:
+                        # Validate downloaded image
+                        if is_valid_image(temp_file_path):
+                            success = True
+                            page_data["status"] = "valid"
+                            stats["downloaded"] += 1
+                            # Move temp file to final location if not keeping raw
+                            if not self.keep_raw:
+                                temp_file_path.replace(file_path)
+                        else:
+                            logger.warning(f"Downloaded file is not a valid image: {temp_file_path}")
+                            page_data["status"] = "invalid"
+                            retry_count += 1
+                            stats["retries"] += 1
+                            # Remove invalid temp file
+                            if temp_file_path.exists():
+                                temp_file_path.unlink()
+                            await asyncio.sleep(5)
+                            continue
+                    else:
+                        retry_count += 1
+                        stats["retries"] += 1
+                        # Remove failed temp file
+                        if temp_file_path.exists():
+                            temp_file_path.unlink()
+                        await asyncio.sleep(5)  # Wait before retrying
+                        continue
+                except Exception as e:
+                    logger.warning(f"Error downloading {url}: {e}")
+                    retry_count += 1
+                    stats["retries"] += 1
+                    # Remove errored temp file
+                    if temp_file_path.exists():
+                        temp_file_path.unlink()
+                    await asyncio.sleep(5)  # Wait before retrying
+                    continue
+                # Update manifest with the page status
+                if manifest:
+                    manifest = update_manifest_page(manifest, chapter_id, page_data)
+                if success:
+                    successful += 1
+                else:
+                    stats["failed"] += 1
+                progress.update(1)
         progress.close()
         
+        # Update chapter status in manifest
+        if manifest:
+            chapter_data["total_pages"] = total
+            chapter_data["successful_pages"] = successful
+            chapter_data["status"] = "complete" if successful == total else "incomplete"
+            manifest = update_manifest_chapter(manifest, chapter_data)
+        
         logger.info(f"Downloaded {successful}/{total} images for chapter {chapter_id}")
-        return successful, total
+        return successful, total, stats
     
     async def download_volume(self, manga_id: str, manga_title: str, volume_number: str,
                              chapter_ids: Optional[Set[str]] = None, 
-                             language: str = "en") -> Dict[str, Any]:
+                             language: str = "en",
+                             check_local: bool = True,
+                             force_download: bool = False) -> Dict[str, Any]:
         """Download all chapters in a volume.
         
         Args:
@@ -225,11 +362,21 @@ class ChapterDownloader:
             volume_number: Volume number to download.
             chapter_ids: Optional set of specific chapter IDs to download.
             language: Preferred language for translations.
+            check_local: Whether to check for existing valid files.
+            force_download: Whether to ignore local files and force download.
             
         Returns:
             Dict with download results.
         """
         await self.initialize()
+        
+        # Statistics for tracking downloaded/skipped files
+        download_stats = {
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "retries": 0
+        }
         
         # Get volume information - use API cache if enabled
         cache_key = f"manga_volumes:{manga_id}:{language}"
@@ -249,7 +396,8 @@ class ChapterDownloader:
                 "success": False,
                 "message": f"Volume {volume_number} not found",
                 "chapters_downloaded": 0,
-                "total_chapters": 0
+                "total_chapters": 0,
+                "stats": download_stats
             }
         
         volume_data = volumes[volume_number]
@@ -261,12 +409,29 @@ class ChapterDownloader:
                 "success": False,
                 "message": "No chapters found",
                 "chapters_downloaded": 0,
-                "total_chapters": 0
+                "total_chapters": 0,
+                "stats": download_stats
             }
         
         # Create paths
         manga_path = generate_manga_path(self.output_dir, manga_title)
+        print(f"[DEBUG] downloader: manga_path={manga_path}")  # DEBUG
         volume_path = generate_volume_path(manga_path, volume_number)
+        print(f"[DEBUG] downloader: volume_path={volume_path}")  # DEBUG
+        
+        # Check for existing manifest or create new one
+        manifest = None
+        if check_local and not force_download:
+            manifest = load_manifest(volume_path)
+            
+            # If checking for updates, log the found manifest
+            if manifest:
+                logger.info(f"Found existing manifest for volume {volume_number}")
+        
+        # Create new manifest if none exists or force download
+        if manifest is None or force_download:
+            manifest = create_volume_manifest(manga_id, manga_title, volume_number)
+            logger.info(f"Created new manifest for volume {volume_number}")
         
         # Filter chapters if specific IDs requested
         chapter_data = []
@@ -290,9 +455,22 @@ class ChapterDownloader:
             chapter_num = chapter["number"]
             chapter_title = sanitize_filename(chapter["title"])
             
-            # Create chapter directory
-            chapter_dir = volume_path / f"chapter_{chapter_num}_{chapter_title}"
-            ensure_directory(chapter_dir)
+            # Create chapter directory using standardized path
+            chapter_dir = generate_chapter_path(volume_path, chapter_num, chapter_title)
+            
+            # Add to manifest if not already there
+            chapter_manifest_data = {
+                "id": chapter_id,
+                "number": chapter_num,
+                "title": chapter_title,
+                "directory": str(chapter_dir),
+                "download_timestamp": datetime.now().isoformat()
+            }
+            manifest = update_manifest_chapter(manifest, chapter_manifest_data)
+            
+            # Save manifest after each chapter update
+            print(f"[DEBUG] downloader: save_manifest called with volume_path={volume_path}")  # DEBUG
+            save_manifest(manifest, volume_path)
             
             job = {
                 "id": chapter_id,
@@ -307,7 +485,22 @@ class ChapterDownloader:
             chapter_id = job["id"]
             output_dir = job["output_dir"]
             
-            successful, total = await self.download_chapter_images(chapter_id, output_dir)
+            successful, total, stats = await self.download_chapter_images(
+                chapter_id, 
+                output_dir, 
+                check_local=check_local,
+                force_download=force_download,
+                manifest=manifest
+            )
+            
+            # Update global download stats
+            for key in download_stats:
+                if key in stats:
+                    download_stats[key] += stats[key]
+            
+            # Save manifest after each chapter
+            print(f"[DEBUG] downloader: save_manifest called with volume_path={volume_path}")  # DEBUG
+            save_manifest(manifest, volume_path)
             
             return {
                 "success": successful > 0,
@@ -315,7 +508,8 @@ class ChapterDownloader:
                 "number": job["number"],
                 "title": job["title"],
                 "successful_images": successful,
-                "total_images": total
+                "total_images": total,
+                "stats": stats
             }
         
         desc = f"Downloading {manga_title} vol.{volume_number}"
@@ -327,6 +521,11 @@ class ChapterDownloader:
         
         successful_chapters = download_results["completed"]
         
+        # Final manifest save
+        print(f"[DEBUG] downloader: save_manifest called with volume_path={volume_path}")  # DEBUG
+        manifest["status"] = "complete" if successful_chapters == total_chapters else "incomplete"
+        save_manifest(manifest, volume_path)
+        
         logger.info(f"Downloaded {successful_chapters}/{total_chapters} chapters for volume {volume_number}")
         
         return {
@@ -336,7 +535,9 @@ class ChapterDownloader:
             "total_chapters": total_chapters,
             "manga_path": str(manga_path),
             "volume_path": str(volume_path),
-            "chapters": download_results["chapters"]
+            "chapters": download_results["chapters"],
+            "manifest": manifest,
+            "stats": download_stats
         }
 
 
@@ -346,7 +547,9 @@ async def download_manga_volumes(manga_id: str, manga_title: str, volumes: List[
                                language: str = "en",
                                max_concurrent_volumes: int = 2,
                                max_concurrent_chapters: int = 5,
-                               use_cache: bool = True) -> Dict[str, Any]:
+                               use_cache: bool = True,
+                               check_local: bool = True,
+                               force_download: bool = False) -> Dict[str, Any]:
     """Download multiple volumes of a manga.
     
     Args:
@@ -359,13 +562,15 @@ async def download_manga_volumes(manga_id: str, manga_title: str, volumes: List[
         max_concurrent_volumes: Maximum number of volumes to download concurrently.
         max_concurrent_chapters: Maximum number of chapters to download concurrently.
         use_cache: Whether to use API response caching.
+        check_local: Whether to check for existing local files before downloading.
+        force_download: Whether to force download even if local files exist.
         
     Returns:
         Dict with download results.
     """
     downloader = ChapterDownloader(
         output_dir=output_dir, 
-        keep_raw=keep_raw,
+        keep_raw=keep_raw,  # Use the function argument again
         max_concurrent=max_concurrent_chapters,
         use_cache=use_cache
     )
@@ -381,7 +586,13 @@ async def download_manga_volumes(manga_id: str, manga_title: str, volumes: List[
             "failed": 0,
             "total": len(volumes),
             "started_at": datetime.now().isoformat(),
-            "completed_at": None
+            "completed_at": None,
+            "stats": {
+                "downloaded": 0,
+                "skipped": 0,
+                "failed": 0,
+                "retries": 0
+            }
         }
         
         # Function to download a single volume
@@ -392,7 +603,9 @@ async def download_manga_volumes(manga_id: str, manga_title: str, volumes: List[
                 manga_id=manga_id,
                 manga_title=manga_title,
                 volume_number=volume_number,
-                language=language
+                language=language,
+                check_local=check_local,
+                force_download=force_download
             )
             
             return volume_number, result
@@ -418,6 +631,12 @@ async def download_manga_volumes(manga_id: str, manga_title: str, volumes: List[
                 results["successful"] += 1
             else:
                 results["failed"] += 1
+            
+            # Aggregate download statistics
+            if "stats" in result:
+                for key, value in result["stats"].items():
+                    if key in results["stats"]:
+                        results["stats"][key] += value
         
         results["completed_at"] = datetime.now().isoformat()
         

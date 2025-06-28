@@ -4,6 +4,8 @@ This module provides the CLI functionality for the MangaBook application,
 including manga search, selection, and display features.
 """
 
+print("[DEBUG] cli.py: CLI entry point reached")  # DEBUG
+
 import asyncio
 import logging
 import re
@@ -598,9 +600,13 @@ def info(ctx, manga_id, language):
 @click.option('--keep-raw', is_flag=True, help="Keep raw downloaded files")
 @click.option('--quality', default=85, help="Image quality (1-100)")
 @click.option('--kobo', is_flag=True, default=True, help="Create Kobo-compatible EPUB")
+@click.option('--use-enhanced-builder', is_flag=True, default=True, help="Use the enhanced builder for more reliable EPUB generation with strict spec compliance")
 @click.option('--no-validate', is_flag=True, help="Skip EPUB validation")
+@click.option('--check-local', is_flag=True, default=True, help="Check for valid local files before downloading")
+@click.option('--force-download', is_flag=True, help="Force download even if local files exist")
 @click.pass_context
-def download(ctx, manga_id, volumes, language, output, keep_raw, quality, kobo, no_validate):
+def download(ctx, manga_id, volumes, language, output, keep_raw, quality, kobo, 
+             use_enhanced_builder, no_validate, check_local, force_download):
     """Download manga volumes and convert to EPUB.
     
     MANGA_ID is the MangaDex ID of the manga.
@@ -608,15 +614,23 @@ def download(ctx, manga_id, volumes, language, output, keep_raw, quality, kobo, 
     Examples:
       mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1-10"
       mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1,3,5"
+      mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1-3" --check-local
+      mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1-3" --force-download
     """
+    print(f"[DEBUG] cli.py: download command called with manga_id={manga_id}, volumes={volumes}, output={output}")  # DEBUG
     config = ctx.obj['CONFIG']
     
     # Use config values if options not provided
     if not output:
         output = config.get_output_dir()
     
+    # If force_download is specified, disable check_local
+    if force_download:
+        check_local = False
+    
     asyncio.run(download_command(
-        manga_id, volumes, language, output, keep_raw, quality, kobo, not no_validate
+        manga_id, volumes, language, output, keep_raw, quality, kobo,
+        use_enhanced_builder, not no_validate, check_local, force_download
     ))
 
 
@@ -758,7 +772,8 @@ async def info_command(manga_id: str, language: str) -> None:
 
 async def download_command(manga_id: str, volumes: Optional[str], language: str,
                          output_dir: str, keep_raw: bool, quality: int, 
-                         kobo: bool, validate: bool) -> None:
+                         kobo: bool, use_enhanced_builder: bool = True, validate: bool = True, 
+                         check_local: bool = True, force_download: bool = False) -> None:
     """Implementation of the download command."""
     try:
         # Check disk space
@@ -823,8 +838,11 @@ async def download_command(manga_id: str, volumes: Optional[str], language: str,
             keep_raw=keep_raw,
             quality=quality,
             kobo=kobo,
+            use_enhanced_builder=use_enhanced_builder,
             language=language,
-            validate=validate
+            validate=validate,
+            check_local=check_local,
+            force_download=force_download
         )
         
     except Exception as e:
@@ -1188,3 +1206,6 @@ async def history_command(output_dir: str) -> None:
         error = error_handler.handle(e, category=ErrorCategory.UNEXPECTED)
         error_handler.display_error(error)
         logger.error(f"Error in history command: {e}")
+
+if __name__ == "__main__":
+    cli()

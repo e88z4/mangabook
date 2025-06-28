@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Default configuration values
 DEFAULT_CONFIG = {
-    "output_directory": str(Path.home() / "Documents" / "MangaBooks"),
+    "output_directory": str(Path.cwd() / "downloaded_volume"),
     "keep_raw_files": False,
     "image_quality": 85,
     "default_language": "en",

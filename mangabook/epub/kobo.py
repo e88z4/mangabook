@@ -195,10 +195,20 @@ class KepubBuilder(EPUBBuilder):
                 for xhtml_file in xhtml_files:
                     self._process_xhtml_for_kobo(xhtml_file)
                 
+                # Process navigation document (nav.xhtml)
+                nav_file = temp_dir / 'OEBPS' / 'nav.xhtml'
+                if nav_file.exists():
+                    self._process_nav_for_kobo(nav_file)
+                
                 # Update the content.opf file
                 content_opf = temp_dir / 'OEBPS' / 'content.opf'
                 if content_opf.exists():
                     self._update_content_opf(content_opf)
+                
+                # Update the toc.ncx file
+                toc_ncx = temp_dir / 'OEBPS' / 'toc.ncx'
+                if toc_ncx.exists():
+                    self._update_toc_ncx(toc_ncx)
                 
                 # Recreate the EPUB file
                 os.remove(filepath)
@@ -218,6 +228,8 @@ class KepubBuilder(EPUBBuilder):
                             file_path = root_path / file
                             arcname = file_path.relative_to(temp_dir)
                             zipf.write(file_path, arcname)
+                
+                logger.info(f"Applied Kobo modifications to {filepath}")
         
         except Exception as e:
             logger.error(f"Error applying Kobo modifications: {e}")
@@ -234,6 +246,13 @@ class KepubBuilder(EPUBBuilder):
             
             # Parse with BeautifulSoup
             soup = BeautifulSoup(content, 'html.parser')
+            
+            # Add Kobo namespace to the html tag if not already present
+            html_tag = soup.find('html')
+            if html_tag:
+                for ns_name, ns_value in KOBO_NAMESPACE.items():
+                    if ns_name not in html_tag.attrs:
+                        html_tag[ns_name] = ns_value
             
             # Find all paragraphs and add Kobo spans
             paragraphs = soup.find_all('p')
@@ -278,12 +297,78 @@ class KepubBuilder(EPUBBuilder):
                     kobo_span.string = current_sentence
                     p.append(kobo_span)
             
+            # Process image divs for Kobo
+            image_divs = soup.find_all('div', class_='image')
+            for i, div in enumerate(image_divs):
+                # Create a unique ID for the image div
+                img_div_id = f"kobo_img_{i}"
+                div['id'] = img_div_id
+                
+                # Find the image and add a kobo span
+                img = div.find('img')
+                if img and not img.find_parent('span', class_='koboSpan'):
+                    span_id = f"kobo.img.{i}.1"
+                    kobo_span = soup.new_tag('span', id=span_id, **{'class': 'koboSpan'})
+                    img.wrap(kobo_span)
+            
             # Write the modified content back
             with open(xhtml_path, 'w', encoding='utf-8') as f:
                 f.write(str(soup))
+            
+            logger.debug(f"Processed XHTML for Kobo: {xhtml_path}")
         
         except Exception as e:
             logger.error(f"Error processing {xhtml_path} for Kobo: {e}")
+    
+    def _process_nav_for_kobo(self, nav_path: Union[str, Path]) -> None:
+        """Process the navigation document (nav.xhtml) for Kobo compatibility.
+        
+        Args:
+            nav_path: Path to the navigation document.
+        """
+        try:
+            with open(nav_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Add Kobo namespace to HTML tag
+            html_tag = soup.find('html')
+            if html_tag:
+                for ns_name, ns_value in KOBO_NAMESPACE.items():
+                    html_tag[ns_name] = ns_value
+            
+            # Find the nav element
+            nav = soup.find('nav', attrs={'epub:type': 'toc'})
+            if nav:
+                # Make sure the nav has an id and class
+                if not nav.get('id'):
+                    nav['id'] = 'toc'
+                
+                # Add Kobo spans to list items
+                items = nav.find_all('li')
+                for i, item in enumerate(items):
+                    # Wrap the content in a kobo span
+                    a_tag = item.find('a')
+                    if a_tag and not a_tag.find('span', class_='koboSpan'):
+                        # Create a kobo span
+                        span_id = f"kobo.toc.{i+1}"
+                        kobo_span = soup.new_tag('span', id=span_id, **{'class': 'koboSpan'})
+                        
+                        # Move the a tag's contents to the span
+                        kobo_span.append(a_tag.string)
+                        a_tag.string = ''
+                        a_tag.append(kobo_span)
+            
+            # Write the modified content back
+            with open(nav_path, 'w', encoding='utf-8') as f:
+                f.write(str(soup))
+            
+            logger.debug(f"Processed navigation document for Kobo: {nav_path}")
+        
+        except Exception as e:
+            logger.error(f"Error processing navigation document for Kobo: {e}")
     
     def _update_content_opf(self, opf_path: Union[str, Path]) -> None:
         """Update the content.opf file with Kobo-specific metadata.
@@ -296,6 +381,12 @@ class KepubBuilder(EPUBBuilder):
             tree = ET.parse(opf_path)
             root = tree.getroot()
             
+            # Define namespaces for XPath queries
+            namespaces = {
+                'opf': 'http://www.idpf.org/2007/opf',
+                'dc': 'http://purl.org/dc/elements/1.1/'
+            }
+            
             # Add Kobo reading direction property if not present
             if self.reading_direction == 'rtl':
                 # Check for existing spine properties
@@ -303,8 +394,75 @@ class KepubBuilder(EPUBBuilder):
                 if spine is not None and not spine.get('page-progression-direction'):
                     spine.set('page-progression-direction', 'rtl')
             
+            # Ensure toc attribute is set for spine element
+            spine = root.find('.//{http://www.idpf.org/2007/opf}spine')
+            if spine is not None:
+                # Find the NCX item in the manifest
+                manifest = root.find('.//{http://www.idpf.org/2007/opf}manifest')
+                if manifest is not None:
+                    ncx_item = None
+                    for item in manifest.findall('.//{http://www.idpf.org/2007/opf}item'):
+                        if item.get('media-type') == 'application/x-dtbncx+xml':
+                            ncx_item = item
+                            break
+                    
+                    # If NCX item found, set the toc attribute
+                    if ncx_item is not None:
+                        spine.set('toc', ncx_item.get('id'))
+                
+                # Check if the nav document is in the spine
+                nav_in_spine = False
+                manifest = root.find('.//{http://www.idpf.org/2007/opf}manifest')
+                if manifest is not None:
+                    nav_item = None
+                    for item in manifest.findall('.//{http://www.idpf.org/2007/opf}item'):
+                        if item.get('properties') == 'nav':
+                            nav_item = item
+                            break
+                    
+                    if nav_item is not None:
+                        # Check if this nav item is in the spine
+                        nav_id = nav_item.get('id')
+                        for itemref in spine.findall('.//{http://www.idpf.org/2007/opf}itemref'):
+                            if itemref.get('idref') == nav_id:
+                                nav_in_spine = True
+                                break
+                        
+                        # If not in spine, add it
+                        if not nav_in_spine:
+                            logger.debug("Adding nav document to spine")
+                            itemref = ET.SubElement(spine, '{http://www.idpf.org/2007/opf}itemref')
+                            itemref.set('idref', nav_id)
+                            itemref.set('linear', 'yes')
+            
+            # Add additional Kobo-specific properties
+            metadata = root.find('.//{http://www.idpf.org/2007/opf}metadata')
+            if metadata is not None:
+                # Add Kobo reading experience and version metadata
+                meta_tags_to_add = [
+                    {'name': 'book-type', 'content': 'manga'},
+                    {'name': 'orientation-lock', 'content': 'portrait'},
+                    {'name': 'generator', 'content': 'MangaBook EPUB Generator'}
+                ]
+                
+                for meta_data in meta_tags_to_add:
+                    # Check if the meta tag already exists
+                    exists = False
+                    for meta in metadata.findall('.//{http://www.idpf.org/2007/opf}meta'):
+                        if meta.get('name') == meta_data['name']:
+                            exists = True
+                            break
+                    
+                    # Add the meta tag if it doesn't exist
+                    if not exists:
+                        meta = ET.SubElement(metadata, '{http://www.idpf.org/2007/opf}meta')
+                        meta.set('name', meta_data['name'])
+                        meta.set('content', meta_data['content'])
+            
             # Write the updated OPF file
             tree.write(opf_path, encoding='utf-8', xml_declaration=True)
+            
+            logger.debug(f"Updated content.opf for Kobo: {opf_path}")
         
         except Exception as e:
             logger.error(f"Error updating {opf_path} for Kobo: {e}")
