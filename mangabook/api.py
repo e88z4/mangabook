@@ -7,9 +7,10 @@ handling authentication, pagination, error handling, and retries.
 import asyncio
 import logging
 from typing import List, Dict, Any, Optional, Union, Tuple, Generator, AsyncGenerator
+from pathlib import Path
 
 from .auth import AuthManager, AuthenticationError
-from .utils import retry, exception_handler
+from .utils import retry, exception_handler, ensure_directory
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -364,6 +365,129 @@ class MangaDexAPI:
         await client._ensure_session()
         async with client.session.get(f"{client.base_url}{url}") as response:
             return await response.json()
+    
+    @exception_handler
+    @retry(max_attempts=3, delay=1.0, backoff=2.0)
+    async def get_volume_cover_art(self, manga_id: str, volume_number: str) -> Optional[str]:
+        """Get volume-specific cover art URL for a manga.
+        
+        Args:
+            manga_id: The MangaDex ID of the manga.
+            volume_number: The volume number as a string (e.g., '1', '01', etc.)
+            
+        Returns:
+            Optional[str]: URL for the volume cover art, or None if not found.
+            
+        Raises:
+            AuthenticationError: If authentication fails.
+            Exception: If the API request fails.
+        """
+        client = await self._get_client()
+        
+        # Build query parameters
+        url = "/cover"
+        params = {
+            "manga[]": manga_id,
+            "limit": 100,  # Get a large number of covers to search through
+            "offset": 0,
+            "order[volume]": "asc"  # Order by volume number
+        }
+        
+        # Use direct HTTP request
+        await client._ensure_session()
+        async with client.session.get(f"{client.base_url}{url}", params=params) as response:
+            response_data = await response.json()
+            
+            # Check for errors
+            if response_data.get("result") != "ok":
+                logger.error(f"Error fetching covers: {response_data.get('errors', [])}")
+                return None
+            
+            # Extract covers data
+            covers = response_data.get("data", [])
+            if not covers:
+                logger.warning(f"No covers found for manga {manga_id}")
+                return None
+            
+            # Find the cover for the specified volume
+            target_cover = None
+            for cover in covers:
+                if "attributes" in cover and cover["attributes"].get("volume") == volume_number:
+                    target_cover = cover
+                    break
+            
+            # If volume number didn't match exactly, try to match without leading zeros
+            if not target_cover and volume_number.startswith("0"):
+                stripped_volume = volume_number.lstrip("0")
+                if stripped_volume:  # Ensure it's not empty (e.g., volume "0")
+                    for cover in covers:
+                        if "attributes" in cover and cover["attributes"].get("volume") == stripped_volume:
+                            target_cover = cover
+                            break
+            
+            # If still no match and volume has no leading zeros, try with leading zeros
+            if not target_cover and not volume_number.startswith("0"):
+                padded_volume = volume_number.zfill(2)  # Add leading zero
+                for cover in covers:
+                    if "attributes" in cover and cover["attributes"].get("volume") == padded_volume:
+                        target_cover = cover
+                        break
+            
+            # If we found a cover, construct the URL
+            if target_cover and "attributes" in target_cover:
+                filename = target_cover["attributes"].get("fileName")
+                if filename:
+                    return f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
+            
+            # If no specific volume cover found, fall back to the general cover
+            logger.warning(f"No specific cover found for volume {volume_number}, falling back to general cover")
+            return await self.get_cover_art(manga_id)
+    
+    @exception_handler
+    @retry(max_attempts=3, delay=1.0, backoff=2.0)
+    async def download_cover_image(self, cover_url: str, output_path: Union[str, Path]) -> Optional[str]:
+        """Download a cover image from a URL.
+        
+        Args:
+            cover_url: URL of the cover image.
+            output_path: Path where the cover image should be saved.
+            
+        Returns:
+            Optional[str]: Path to the downloaded cover image, or None if download failed.
+            
+        Raises:
+            AuthenticationError: If authentication fails.
+            Exception: If the API request fails.
+        """
+        if not cover_url:
+            logger.error("No cover URL provided")
+            return None
+        
+        output_path = Path(output_path)
+        ensure_directory(output_path.parent)
+        
+        client = await self._get_client()
+        await client._ensure_session()
+        
+        try:
+            async with client.session.get(cover_url) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to download cover image: {response.status}")
+                    return None
+                
+                # Read the image data
+                image_data = await response.read()
+                
+                # Save the image
+                with open(output_path, 'wb') as f:
+                    f.write(image_data)
+                
+                logger.info(f"Downloaded cover image to {output_path}")
+                return str(output_path)
+        
+        except Exception as e:
+            logger.error(f"Error downloading cover image: {e}")
+            return None
 
 
 # Singleton instance for global use

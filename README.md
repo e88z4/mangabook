@@ -28,6 +28,8 @@ A Python console application to download manga from MangaDex and create Kobo-com
 - **NEW:** Support for large manga volumes through robust navigation handling
 - **NEW:** Options to use either standard or enhanced builders
 - **NEW:** Proper cover handling and epubcheck validation
+- **NEW:** Official MangaDex volume cover integration - uses the correct cover art for each volume
+- **NEW:** Canonical Kobo collection folders for easy device upload - organizes all .kepub.epub files in one place
 
 ## Requirements
 
@@ -60,6 +62,27 @@ The application now includes an enhanced EPUB/KEPUB builder that addresses issue
 
 The enhanced builder is enabled by default but can be disabled with the `--use-enhanced-builder=False` option if needed.
 
+### Official MangaDex Cover Integration
+
+MangaBook now fetches and uses the official volume covers from MangaDex:
+
+- Automatically queries the MangaDex API for volume-specific cover art
+- Downloads high-quality official covers from MangaDex servers
+- Uses the official cover in the EPUB/KEPUB metadata
+- Falls back to using the first chapter image if no official cover is found
+- Can be controlled with the `--use-official-covers` flag (default: True)
+
+### Canonical Kobo Collection
+
+For Kobo users, MangaBook can now organize all your .kepub.epub files into a canonical directory structure:
+
+- Creates a dedicated `{manga-title}_kobo` folder for each manga series
+- Collects all .kepub.epub files for the manga in this folder
+- Makes it easy to sync all volumes to your Kobo device at once
+- Perfect for simple `rsync` or drag-and-drop transfers to your device
+- Includes a README file with upload instructions
+- Can be controlled with the `--create-kobo-collection` flag (default: True)
+
 ### Local File Management
 
 MangaBook intelligently checks for existing local files before downloading, avoiding unnecessary downloads and bandwidth usage. This behavior can be controlled with:
@@ -88,16 +111,18 @@ mangabook interactive
 ### Command Line Options
 
 ```
---volumes TEXT       Volumes to download (e.g., "1-10" or "1,3,5")
---language TEXT      Language code (e.g., "en", "ja")
---output TEXT        Output directory
---keep-raw           Keep raw downloaded files
---quality INTEGER    Image quality (1-100)
---kobo              Create Kobo-compatible EPUB (default: True)
---use-enhanced-builder  Use the enhanced builder for more reliable EPUB generation (default: True)
---no-validate        Skip EPUB validation
---check-local        Check for valid local files before downloading (default: True)
---force-download     Force download even if local files exist
+--volumes TEXT           Volumes to download (e.g., "1-10" or "1,3,5")
+--language TEXT          Language code (e.g., "en", "ja")
+--output TEXT            Output directory
+--keep-raw               Keep raw downloaded files
+--quality INTEGER        Image quality (1-100)
+--kobo                   Create Kobo-compatible EPUB (default: True)
+--use-enhanced-builder   Use the enhanced builder for more reliable EPUB generation (default: True)
+--use-official-covers    Use official MangaDex volume covers when available (default: True)
+--create-kobo-collection Create a canonical Kobo collection folder for easy device upload (default: True)
+--no-validate            Skip EPUB validation
+--check-local            Check for valid local files before downloading (default: True)
+--force-download         Force download even if local files exist
 ```
 
 ## Installation

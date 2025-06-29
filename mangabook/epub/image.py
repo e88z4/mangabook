@@ -248,14 +248,13 @@ class ImageProcessor:
         return result
     
     def detect_reading_direction(self, images_dir: Union[str, Path]) -> str:
-        """Attempt to detect the reading direction of manga images.
+        """Determine the reading direction of manga images.
         
         Args:
             images_dir: Directory containing manga images.
             
         Returns:
-            str: "rtl" for right-to-left (manga style) or "ltr" for left-to-right.
+            str: Always "rtl" for right-to-left (manga style) since manga is read from right to left.
         """
-        # This is a simple heuristic - could be enhanced with ML in the future
-        # For now, we'll assume manga is always right-to-left
+        # Manga is always read from right to left, so we always return "rtl"
         return "rtl"

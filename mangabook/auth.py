@@ -128,7 +128,7 @@ def load_credentials() -> Optional[Dict[str, Any]]:
     try:
         with open(CREDENTIALS_FILE, "r") as f:
             credentials = json.load(f)
-        logger.debug("Credentials loaded successfully")
+        logger.debug(f"Credentials loaded: username={credentials.get('username')}, client_id={credentials.get('client_id')}, has_password={'password' in credentials and bool(credentials.get('password'))}")
         return credentials
     except (json.JSONDecodeError, OSError) as e:
         logger.error(f"Error loading credentials file: {e}")
@@ -233,8 +233,10 @@ async def login(username: Optional[str] = None, password: Optional[str] = None,
     
     credentials = load_credentials()
     if not credentials:
+        logger.error("No credentials found for login.")
         return False, "No credentials found. Please provide username and password."
     
+    logger.info(f"Attempting login with stored credentials: username={credentials.get('username')}, client_id={credentials.get('client_id')}, has_password={'password' in credentials and bool(credentials.get('password'))}")
     try:
         MangaDexAsyncClient = _import_mangadex_client()
         client = MangaDexAsyncClient()
@@ -246,9 +248,11 @@ async def login(username: Optional[str] = None, password: Optional[str] = None,
         client_secret = credentials.get("client_secret", DEFAULT_CLIENT_SECRET)
         
         if not username or not password:
+            logger.error("Incomplete credentials for login.")
             return False, "Incomplete credentials"
         
         if not client_id or not client_secret:
+            logger.error("Missing OAuth2 client credentials for login.")
             return False, "Missing OAuth2 client credentials"
         
         # Use OAuth2 password flow
@@ -262,7 +266,7 @@ async def login(username: Optional[str] = None, password: Optional[str] = None,
         if not auth_result.get("access_token"):
             error_msg = auth_result.get("error", "Unknown error")
             error_description = auth_result.get("error_description", "")
-            # Show the full API response for debugging
+            logger.error(f"Authentication failed: {error_msg} {error_description} | API response: {auth_result}")
             return False, f"Authentication failed: {error_msg} {error_description} | API response: {auth_result}"
         
         # Extract token information
@@ -272,6 +276,7 @@ async def login(username: Optional[str] = None, password: Optional[str] = None,
         
         # Store token information
         if not update_token(token, refresh_token, token_expiry):
+            logger.error("Failed to store token after login.")
             return False, "Failed to store token"
         
         logger.info(f"Successfully logged in as {username}")
@@ -293,15 +298,17 @@ async def refresh_token_if_needed() -> Tuple[bool, str]:
         Tuple[bool, str]: (Success flag, Error message if failed).
     """
     if has_valid_token():
+        logger.debug("Token is valid, no refresh needed.")
         return True, ""
     
     credentials = load_credentials()
     if not credentials:
+        logger.warning("No credentials found for refresh or login.")
         return False, "No credentials found"
     
     refresh_token = credentials.get("refresh_token")
     if not refresh_token:
-        # Try to login using stored username/password
+        logger.info("No refresh token found, attempting login with stored credentials.")
         return await login()
     
     try:
@@ -313,13 +320,15 @@ async def refresh_token_if_needed() -> Tuple[bool, str]:
         client.client_secret = credentials.get("client_secret", DEFAULT_CLIENT_SECRET)
         client.refresh_token = refresh_token
         
-        # Use the built-in refresh method
+        logger.info("Attempting token refresh with stored refresh token.")
         auth_result = await client.refresh_authentication()
         
         if not auth_result.get("access_token"):
             error_msg = auth_result.get("error", "Unknown error")
             error_description = auth_result.get("error_description", "")
-            return False, f"Token refresh failed: {error_msg} {error_description}"
+            logger.warning(f"Token refresh failed: {error_msg} {error_description}. Attempting login with stored credentials.")
+            # Always fallback to login if refresh fails
+            return await login()
         
         # Extract token information
         token = auth_result.get("access_token")
@@ -328,14 +337,15 @@ async def refresh_token_if_needed() -> Tuple[bool, str]:
         
         # Store token information
         if not update_token(token, new_refresh_token, token_expiry):
+            logger.error("Failed to store refreshed token.")
             return False, "Failed to store refreshed token"
         
-        logger.info("Token refreshed successfully")
+        logger.info("Token refreshed successfully.")
         return True, ""
         
     except Exception as e:
-        logger.error(f"Token refresh failed: {e}")
-        # If refresh fails, try to login again
+        logger.error(f"Token refresh exception: {e}. Attempting login with stored credentials.")
+        # Always fallback to login if refresh fails for any reason
         return await login()
     finally:
         # Close the client

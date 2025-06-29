@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                       output_dir: str, keep_raw: bool = False, quality: int = 85,
                       kobo: bool = True, use_enhanced_builder: bool = True, language: str = "en", 
-                      validate: bool = True, check_local: bool = True,
-                      force_download: bool = False) -> Dict[str, Any]:
+                      validate: bool = True, check_local: bool = True, force_download: bool = False,
+                      use_official_covers: bool = True, create_kobo_collection: bool = True,
+                      collection_root: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """Download manga volumes and convert to EPUB.
     
     Args:
@@ -56,6 +57,10 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         validate: Whether to validate generated EPUBs.
         check_local: Whether to check for existing files before downloading.
         force_download: Whether to force download even if local files exist.
+        use_official_covers: Whether to use official MangaDex volume covers when available.
+        create_kobo_collection: Whether to create a canonical Kobo collection folder.
+        collection_root: Root directory for the manga collection. If not specified,
+                        defaults to '{output_dir}/manga-collection'.
         
     Returns:
         Dict with processing results.
@@ -206,8 +211,28 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                     # Create safe filename
                     safe_title = sanitize_filename(vol_title)
                     
-                    # Determine cover image (first image)
-                    cover_image = all_images[0] if all_images else None
+                    # Determine cover image
+                    cover_image = None
+                    
+                    # Use official MangaDex cover if enabled
+                    if use_official_covers:
+                        # Get the official MangaDex cover for this volume
+                        official_cover_url = await api.get_volume_cover_art(manga_id, volume_number)
+                        if official_cover_url:
+                            # Download the official cover
+                            official_cover_path = volume_path / "official_cover.jpg"
+                            downloaded_cover = await api.download_cover_image(official_cover_url, official_cover_path)
+                            if downloaded_cover:
+                                cover_image = official_cover_path
+                                logger.info(f"Using official MangaDex cover for volume {volume_number}")
+                    
+                    # Fall back to the first image if no official cover or feature disabled
+                    if not cover_image:
+                        if use_official_covers:
+                            logger.info(f"No official cover found, using first image as cover")
+                        else:
+                            logger.info(f"Official covers disabled, using first image as cover")
+                        cover_image = all_images[0] if all_images else None
                     
                     # Get reading direction from image processor
                     reading_direction = img_processor.detect_reading_direction(volume_path)
@@ -234,31 +259,70 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                             builder_class = EPUBBuilder
                             epub_ext = ".epub"
                     
-                    epub_filename = f"{safe_title}{epub_ext}"
+                    # Determine the output directory and filename based on collection settings
+                    builder_output_dir = output_dir
                     
+                    # If we're creating a Kobo collection, prepare the collection directory
+                    if kobo and create_kobo_collection:
+                        # Create collection root if specified, otherwise use default
+                        coll_root = Path(collection_root) if collection_root else Path(output_dir) / "manga-collection"
+                        # Create manga-specific directory inside the collection root
+                        manga_coll_dir = coll_root / sanitize_filename(manga_title)
+                        ensure_directory(manga_coll_dir)
+                        # Set the builder to output to the manga collection directory
+                        builder_output_dir = manga_coll_dir
+                        
+                        # For collections, use a more reader-friendly filename format
+                        try:
+                            volume_num = int(float(volume_number))  # Handle volume numbers like "1.0"
+                            epub_filename = f"{manga_title} - Volume {volume_num:03d}{epub_ext}"
+                        except ValueError:
+                            # Handle non-numeric volume numbers
+                            epub_filename = f"{manga_title} - Volume {volume_number}{epub_ext}"
+                    else:
+                        # Standard filename with underscores for non-collection output
+                        epub_filename = f"{safe_title}{epub_ext}"
+                    
+                    # builder_output_dir is already set above, so we don't need to modify it here
+                        
                     builder = builder_class(
                         title=vol_title,
-                        output_dir=output_dir,
+                        output_dir=builder_output_dir,  # This now correctly points to either the collection dir or main output dir
                         language=language,
                         author=author
                     )
                     
-                    # Set reading direction
-                    builder.set_reading_direction(reading_direction)
+                    # Always set reading direction to rtl (right-to-left) for manga
+                    builder.set_reading_direction('rtl')
                     
                     # Set cover if available
                     if cover_image:
                         builder.set_cover(cover_image)
-                        content_images = all_images[1:]
+                        
+                        # If the cover is the first image and the official MangaDex cover wasn't used,
+                        # exclude it from the content to avoid duplication
+                        if cover_image == all_images[0]:
+                            content_images = all_images[1:]
+                        else:
+                            content_images = all_images
                     else:
                         content_images = all_images
                     
                     # Add chapters and images
                     for chapter_name, images in sorted_chapters:
                         if images:
-                            builder.add_chapter(chapter_name, chapter_name, images)
+                            # If this chapter contains the cover image that was already used as the cover,
+                            # and it's the first image of the chapter, remove it to avoid duplication
+                            chapter_images = images
+                            if cover_image and images and cover_image == images[0]:
+                                chapter_images = images[1:]
+                                
+                            if chapter_images:
+                                builder.add_chapter(chapter_name, chapter_name, chapter_images)
                     
-                    # Write EPUB
+                    # The epub_filename is already set above based on collection settings
+                        
+                    # Pass just the filename to builder.write, which will combine it with its output_dir
                     epub_path = error_handler.safe_execute(
                         builder.write,
                         epub_filename,
@@ -368,6 +432,38 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         elapsed_time = end_time - start_time
         results["completed_at"] = str(end_time)
         results["elapsed_seconds"] = elapsed_time.total_seconds()
+        
+        # Since Kobo files are now directly placed in the manga-collection folder, 
+        # we don't need to collect them again, just report the location
+        if kobo and create_kobo_collection and results["successful"] > 0:
+            # Use specified collection_root or default to {output_dir}/manga-collection
+            root_dir = Path(collection_root) if collection_root else Path(output_dir) / "manga-collection"
+            kobo_dir = root_dir / sanitize_filename(manga_title.replace('_', ' '))
+            
+            # Just record the collection info for reporting
+            kobo_files = list(kobo_dir.glob("*.kepub.epub"))
+            count = len(kobo_files)
+            
+            if count > 0:
+                print_success(f"Created {count} Kobo files for '{manga_title}' in {kobo_dir}")
+                print_info(f"Collection root: {root_dir}")
+                
+                # Record results similar to what collect_kobo_files would return
+                results["kobo_collection"] = {
+                    "success": True,
+                    "manga_title": manga_title,
+                    "kobo_dir": str(kobo_dir),
+                    "collection_root": str(root_dir),
+                    "files": [{"source": str(f), "destination": str(f), "success": True} for f in kobo_files]
+                }
+            else:
+                print_warning(f"No Kobo files found in {kobo_dir}")
+                results["kobo_collection"] = {
+                    "success": False, 
+                    "message": "No Kobo files found",
+                    "manga_title": manga_title,
+                    "kobo_dir": str(kobo_dir)
+                }
         
         display_results_summary(results)
         
@@ -591,3 +687,146 @@ async def check_environment() -> Dict[str, Any]:
         }
     
     return environment
+
+
+async def collect_kobo_files(output_dir: Union[str, Path], manga_title: str, 
+                        create_symlinks: bool = False, 
+                        collection_root: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+    """Collect all .kepub.epub files for a manga into a canonical folder structure.
+    
+    Creates a folder structure like:
+    {manga-collection-root}/
+      {manga_title}/
+        {volume1}.kepub.epub
+        {volume2}.kepub.epub
+    
+    Args:
+        output_dir: Base directory where manga volumes are stored.
+        manga_title: Title of the manga.
+        create_symlinks: Whether to create symlinks instead of copying files.
+        collection_root: Root directory for the manga collection. If not specified,
+                         will use '{output_dir}/manga-collection' as the root directory.
+        
+    Returns:
+        Dict with results of the collection process.
+    """
+    output_dir = Path(output_dir)
+    safe_manga_name = sanitize_filename(manga_title)
+    manga_dir = output_dir / safe_manga_name
+    
+    # Find all volume directories
+    volume_dirs = list(manga_dir.glob("volume_*"))
+    if not volume_dirs:
+        logger.warning(f"No volume directories found for manga '{manga_title}'")
+        return {"success": False, "message": "No volume directories found"}
+    
+    # Create canonical Kobo collection structure
+    if collection_root:
+        collection_root = Path(collection_root)
+    else:
+        # Default collection root is in the output directory
+        collection_root = output_dir / "manga-collection"
+        
+    # Create manga-specific directory inside the collection root
+    kobo_dir = collection_root / sanitize_filename(manga_title.replace('_', ' '))
+    ensure_directory(kobo_dir)
+    
+    results = {
+        "manga_title": manga_title,
+        "kobo_dir": str(kobo_dir),
+        "collection_root": str(collection_root),
+        "files": [],
+        "success": True
+    }
+    
+    # Find all .kepub.epub files in volume directories
+    for volume_dir in volume_dirs:
+        kepub_files = list(volume_dir.glob("*.kepub.epub"))
+        for kepub_file in kepub_files:
+            # Extract volume number from the filename or directory name
+            # First try to get it from the filename
+            import re
+            volume_match = re.search(r'volume[_\s-]*(\d+)', kepub_file.stem, re.IGNORECASE)
+            
+            if not volume_match:
+                # Try to extract from the directory name
+                volume_match = re.search(r'volume[_\s-]*(\d+)', volume_dir.name, re.IGNORECASE)
+                
+            volume_num = volume_match.group(1) if volume_match else "unknown"
+            
+            # Create a nicely formatted destination filename
+            # Use manga title with spaces instead of underscores for better readability
+            readable_manga_name = manga_title.replace('_', ' ')
+            dest_filename = f"{readable_manga_name} - Volume {volume_num}.kepub.epub"
+            dest_path = kobo_dir / dest_filename
+            
+            try:
+                if create_symlinks:
+                    # Create a symbolic link
+                    if dest_path.exists():
+                        dest_path.unlink()
+                    os.symlink(kepub_file, dest_path)
+                    logger.info(f"Created symbolic link: {dest_path} -> {kepub_file}")
+                else:
+                    # Copy the file
+                    shutil.copy2(kepub_file, dest_path)
+                    logger.info(f"Copied: {kepub_file} -> {dest_path}")
+                
+                results["files"].append({
+                    "source": str(kepub_file),
+                    "destination": str(dest_path),
+                    "success": True
+                })
+            except Exception as e:
+                logger.error(f"Error processing {kepub_file}: {e}")
+                results["files"].append({
+                    "source": str(kepub_file),
+                    "destination": str(dest_path),
+                    "success": False,
+                    "error": str(e)
+                })
+    
+    # Create a README file with instructions
+    from datetime import datetime
+    readme_content = f"""# Manga Collection for Kobo
+
+This directory contains manga files organized by series for easy access on Kobo e-readers:
+
+```
+{collection_root.name}/
+  Manga Title 1/
+    volume1.kepub.epub
+    volume2.kepub.epub
+  Manga Title 2/
+    volume1.kepub.epub
+    ...
+```
+
+## Upload Instructions
+
+1. Connect your Kobo device to your computer via USB
+2. Copy entire series folders to the 'Books' directory on your Kobo
+3. Safely disconnect your device
+4. The books will appear in your library automatically, organized by series
+
+Generated by MangaBook on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+    
+    # Create README in collection root
+    readme_path = collection_root / "README.md"
+    try:
+        with open(readme_path, 'w', encoding='utf-8') as f:
+            f.write(readme_content)
+        logger.info(f"Created README file: {readme_path}")
+    except Exception as e:
+        logger.error(f"Error creating README file: {e}")
+    
+    # Print summary
+    if results["files"]:
+        logger.info(f"Collected {len(results['files'])} Kobo files for '{manga_title}' in {kobo_dir}")
+    else:
+        logger.warning(f"No .kepub.epub files found for '{manga_title}'")
+        results["success"] = False
+        results["message"] = "No .kepub.epub files found"
+    
+    return results
