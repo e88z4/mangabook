@@ -30,6 +30,9 @@ A Python console application to download manga from MangaDex and create Kobo-com
 - **NEW:** Proper cover handling and epubcheck validation
 - **NEW:** Official MangaDex volume cover integration - uses the correct cover art for each volume
 - **NEW:** Canonical Kobo collection folders for easy device upload - organizes all .kepub.epub files in one place
+- **NEW:** Improved search functionality across all languages
+- **NEW:** Support for downloading ungrouped chapters (chapters not assigned to volumes)
+- **NEW:** Language selection from available translations for each manga
 
 ## Requirements
 
@@ -82,6 +85,21 @@ For Kobo users, MangaBook can now organize all your .kepub.epub files into a can
 - Perfect for simple `rsync` or drag-and-drop transfers to your device
 - Includes a README file with upload instructions
 - Can be controlled with the `--create-kobo-collection` flag (default: True)
+
+### Enhanced Search and Download Functionality
+
+MangaBook now offers improved search and download capabilities:
+
+- **Cross-Language Search**: Search for manga titles across all languages supported by MangaDex
+- **Language Selection**: Choose from all available translations for your selected manga
+- **Ungrouped Chapter Support**: Download chapters that aren't assigned to a specific volume
+  - Chapters are collected in a dedicated "ungrouped_chapters" folder
+  - EPUBs for ungrouped chapters use clear naming: `{manga-title} - Chapters {range}`
+- **Wide Page Detection and Splitting**: Automatically detects and properly splits wide manga pages for optimal reading
+  - Double-page spreads are split into left and right pages
+  - Maintains proper reading order in the final EPUB
+
+The interactive mode has been updated with all these features, providing a guided interface for finding and downloading exactly what you want.
 
 ### Local File Management
 

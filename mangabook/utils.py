@@ -106,14 +106,21 @@ def generate_volume_path(manga_path: Union[str, Path], volume_number: Union[str,
     """Generate a standardized path for a manga volume with zero-padding.
     
     Creates a directory for a manga volume with a consistent 3-digit zero-padded format.
+    Special handling for volume "0" which indicates ungrouped chapters.
     
     Args:
         manga_path: Path to the manga directory.
-        volume_number: Volume number.
+        volume_number: Volume number. "0" indicates ungrouped chapters.
         
     Returns:
         Path: The standardized path for the volume.
     """
+    # Special handling for ungrouped chapters (volume "0")
+    if volume_number == "0" or volume_number == 0:
+        vol_dir = "ungrouped_chapters"
+        volume_path = Path(manga_path) / vol_dir
+        return ensure_directory(volume_path)
+    
     # Convert volume number to a clean format (handling floats, etc.)
     vol_num = format_volume_number(volume_number)
     

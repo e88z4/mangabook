@@ -43,7 +43,7 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
     
     Args:
         query: The search query.
-        language: Optional language filter.
+        language: Optional language filter for content (not for search).
         limit: Maximum number of results.
         
     Returns:
@@ -53,26 +53,38 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
     
     api = await get_api()
     try:
-        response = await api.search_manga(query, limit=limit, language=language)
+        # Search without restricting by language to get all potential matches
+        response = await api.search_manga(query, limit=limit, language=None)
         
         results = []
         for manga in response.get("data", []):
             manga_id = manga["id"]
             attributes = manga["attributes"]
             
-            # Get title in requested language or fall back to English or Japanese
-            title = None
+            # Get all available titles in all languages
+            titles = {}
             if attributes.get("title"):
-                title_dict = attributes["title"]
-                if language and language in title_dict:
-                    title = title_dict[language]
-                elif "en" in title_dict:
-                    title = title_dict["en"]
-                elif "ja" in title_dict:
-                    title = title_dict["ja"]
-                else:
-                    # Just take the first available title
-                    title = next(iter(title_dict.values()), "Unknown")
+                titles = attributes["title"]
+            
+            # Get alternative titles in all languages
+            if attributes.get("altTitles"):
+                for alt_title_dict in attributes["altTitles"]:
+                    for lang, alt_title in alt_title_dict.items():
+                        if lang not in titles:
+                            titles[lang] = alt_title
+            
+            # Determine the best title to display
+            # Priority: requested language > English > Japanese > first available
+            title = None
+            if language and language in titles:
+                title = titles[language]
+            elif "en" in titles:
+                title = titles["en"]
+            elif "ja" in titles:
+                title = titles["ja"]
+            else:
+                # Just take the first available title
+                title = next(iter(titles.values()), "Unknown")
             
             # Get cover art if available
             cover_url = ""
@@ -82,14 +94,21 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
                     if filename:
                         cover_url = f"https://uploads.mangadex.org/covers/{manga_id}/{filename}"
             
+            # Available languages for this manga
+            available_languages = set()
+            if attributes.get("availableTranslatedLanguages"):
+                available_languages = set(attributes.get("availableTranslatedLanguages", []))
+            
             manga_data = {
                 "id": manga_id,
                 "title": format_manga_title(title) if title else "Unknown",
                 "original_language": attributes.get("originalLanguage", "unknown"),
                 "year": attributes.get("year"),
                 "status": attributes.get("status", "unknown"),
-                "description": clean_html(attributes.get("description", {}).get("en", "")),
+                "description": clean_html(attributes.get("description", {}).get(language or "en", "")),
                 "cover_url": cover_url,
+                "all_titles": titles,
+                "available_languages": available_languages
             }
             results.append(manga_data)
         
@@ -109,14 +128,19 @@ def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
         return
     
     # Prepare table data
-    headers = ["#", "Title", "Language", "Status", "Year", "ID"]
+    headers = ["#", "Title", "Original Language", "Available Languages", "Status", "Year", "ID"]
     rows = []
     
     for i, manga in enumerate(results):
+        # Format available languages list
+        available_langs = manga.get("available_languages", set())
+        langs_str = ", ".join(sorted(available_langs)) if available_langs else "None"
+        
         rows.append([
             str(i + 1),
             truncate_string(manga.get("title", "Unknown"), 50),
             manga.get("original_language", "unknown"),
+            truncate_string(langs_str, 20),
             manga.get("status", "unknown"),
             str(manga.get("year", "N/A")),
             manga.get("id", "N/A"),
@@ -304,9 +328,17 @@ async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str
         
         volumes = {}
         
+        # Create a special entry for ungrouped chapters (not in any volume)
+        volumes["0"] = {
+            "chapters": [],
+            "count": 0,
+            "scanlation_groups": set(),
+            "display_name": "Ungrouped Chapters"
+        }
+        
         for chapter in chapters.get("data", []):
             attributes = chapter.get("attributes", {})
-            volume = attributes.get("volume") or "Unknown"
+            volume = attributes.get("volume") or "0"  # Use "0" for chapters without a volume
             chapter_num = attributes.get("chapter") or "Unknown"
             
             # Initialize volume entry if not exists
@@ -314,8 +346,11 @@ async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str
                 volumes[volume] = {
                     "chapters": [],
                     "count": 0,
-                    "scanlation_groups": set()
+                    "scanlation_groups": set(),
+                    "display_name": f"Volume {volume}"
                 }
+            elif volume == "0":
+                volumes[volume]["display_name"] = "Ungrouped Chapters"  # Ensure ungrouped chapters have correct name
             
             # Extract scanlation group
             for relationship in chapter.get("relationships", []):
@@ -328,16 +363,21 @@ async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str
                 "id": chapter["id"],
                 "number": chapter_num,
                 "title": attributes.get("title", ""),
-                "pages": attributes.get("pages", 0)
+                "pages": attributes.get("pages", 0),
+                "volume": volume
             })
             volumes[volume]["count"] += 1
+        
+        # Remove empty ungrouped chapters entry if not used
+        if volumes["0"]["count"] == 0:
+            volumes.pop("0")
         
         # Sort chapters within each volume numerically
         for volume_data in volumes.values():
             volume_data["chapters"].sort(
                 key=lambda c: float(c["number"]) if c["number"].replace(".", "").isdigit() else float("inf")
             )
-        
+            
         return volumes
     finally:
         await api.close()
@@ -362,12 +402,16 @@ def display_volumes(volumes: Dict[str, Dict[str, Any]]) -> None:
     )
     
     for volume, data in sorted_volumes:
-        if volume == "null" or volume == "None":
-            volume_text = "Unknown"
+        if volume == "0":
+            volume_text = "Ungrouped Chapters"
+            click.secho(f"\n{volume_text}", fg="bright_yellow", bold=True)
+        elif volume == "null" or volume == "None":
+            volume_text = "Unknown Volume"
+            click.secho(f"\n{volume_text}", fg="yellow", bold=True)
         else:
             volume_text = f"Volume {volume}"
+            click.secho(f"\n{volume_text}", fg="bright_blue", bold=True)
         
-        click.secho(f"\n{volume_text}", fg="bright_blue", bold=True)
         click.echo(f"Chapters: {data['count']}")
         
         if data.get("scanlation_groups"):
@@ -455,14 +499,24 @@ def volume_selection_prompt(volumes: Dict[str, Dict[str, Any]]) -> Set[str]:
     """
     # Get available volume numbers
     available_volumes = []
+    has_ungrouped = False
+    
     for volume in volumes.keys():
-        if volume != "null" and volume != "None" and volume != "Unknown":
+        if volume == "0":
+            has_ungrouped = True
+        elif volume != "null" and volume != "None" and volume != "Unknown":
             available_volumes.append(volume)
     
     # Sort volumes numerically
     available_volumes.sort(
         key=lambda x: float(x) if x.replace(".", "").isdigit() else float("inf")
     )
+    
+    # Add ungrouped chapters at the end if they exist
+    if has_ungrouped:
+        click.secho("\nUngrouped chapters are available!", fg="bright_yellow")
+        click.echo("To select ungrouped chapters, include '0' in your selection.")
+        available_volumes.append("0")  # Add ungrouped chapters to available options
     
     if not available_volumes:
         click.secho("No volumes available to select.", fg="yellow")
@@ -471,6 +525,8 @@ def volume_selection_prompt(volumes: Dict[str, Dict[str, Any]]) -> Set[str]:
     # Prompt for volumes
     click.echo("\nEnter volume selection:")
     click.echo("Examples: '1' (single volume), '1,3,5' (multiple volumes), '1-5' (range), 'all'")
+    if has_ungrouped:
+        click.echo("Include '0' to select ungrouped chapters, e.g. '0,1,2' or 'all'")
     
     while True:
         selection = click.prompt("Volumes", default="all")
@@ -886,7 +942,11 @@ async def interactive_command() -> None:
             if not query:
                 break
             
-            language = click.prompt("Language code", default="en")
+            # First ask if user wants to search across all languages
+            all_languages = click.confirm("Search across all languages?", default=True)
+            language = None if all_languages else click.prompt("Language code", default="en")
+            
+            # Perform the search
             results = await search_manga(query, language)
             
             if not results:
@@ -907,6 +967,35 @@ async def interactive_command() -> None:
             manga = results[index]
             manga_id = manga["id"]
             manga_title = manga.get("title", "Unknown")
+            
+            # Step 3.5: Select language for content
+            available_languages = manga.get("available_languages", set())
+            
+            if not available_languages:
+                click.secho("No available languages found for this manga.", fg="yellow")
+                language = "en"  # Default to English
+            else:
+                click.echo("\nAvailable languages for this manga:")
+                for i, lang in enumerate(sorted(available_languages)):
+                    click.echo(f"{i+1}. {lang}")
+                
+                # Let user select a language
+                while True:
+                    lang_selection = click.prompt("Enter language code or number", default="en")
+                    
+                    # Check if input is a number
+                    try:
+                        lang_index = int(lang_selection) - 1
+                        if 0 <= lang_index < len(available_languages):
+                            language = sorted(available_languages)[lang_index]
+                            break
+                    except ValueError:
+                        # Check if input is a language code
+                        if lang_selection in available_languages:
+                            language = lang_selection
+                            break
+                    
+                    click.secho("Invalid language selection. Please try again.", fg="yellow")
             
             # Step 4: Show manga details
             manga_details = await get_manga_details(manga_id)
@@ -943,9 +1032,10 @@ async def interactive_command() -> None:
             quality = click.prompt("Image quality (1-100)", default=85, type=int)
             kobo = click.confirm("Create Kobo-compatible EPUB?", default=True)
             validate = click.confirm("Validate generated EPUBs?", default=True)
+            use_official_covers = click.confirm("Use official MangaDex volume covers when available?", default=True)
+            create_kobo_collection = click.confirm("Create a Kobo collection folder for easy device upload?", default=True)
             
             # Step 7: Process manga
-            
             await process_manga(
                 manga_id=manga_id,
                 manga_title=manga_title,
@@ -955,7 +1045,9 @@ async def interactive_command() -> None:
                 quality=quality,
                 kobo=kobo,
                 language=language,
-                validate=validate
+                validate=validate,
+                use_official_covers=use_official_covers,
+                create_kobo_collection=create_kobo_collection
             )
             
             if not click.confirm("Search for another manga?", default=True):

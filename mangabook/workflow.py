@@ -273,15 +273,41 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                         builder_output_dir = manga_coll_dir
                         
                         # For collections, use a more reader-friendly filename format
-                        try:
-                            volume_num = int(float(volume_number))  # Handle volume numbers like "1.0"
-                            epub_filename = f"{manga_title} - Volume {volume_num:03d}{epub_ext}"
-                        except ValueError:
-                            # Handle non-numeric volume numbers
-                            epub_filename = f"{manga_title} - Volume {volume_number}{epub_ext}"
+                        # Special handling for ungrouped chapters
+                        if volume_number == "0":
+                            # For ungrouped chapters, use a special naming convention
+                            chapter_numbers = []
+                            for chapter_name, _ in sorted_chapters:
+                                # Try to extract chapter number from the chapter name
+                                try:
+                                    chapter_num = chapter_name.split()[1]  # Assuming format "Chapter X"
+                                    chapter_numbers.append(chapter_num)
+                                except (IndexError, ValueError):
+                                    pass
+                            
+                            # Create a range or list of chapter numbers
+                            if chapter_numbers:
+                                if len(chapter_numbers) == 1:
+                                    chapter_range = chapter_numbers[0]
+                                else:
+                                    chapter_range = f"{chapter_numbers[0]}-{chapter_numbers[-1]}"
+                                epub_filename = f"{manga_title} - Chapters {chapter_range}{epub_ext}"
+                            else:
+                                epub_filename = f"{manga_title} - Ungrouped Chapters{epub_ext}"
+                        else:
+                            try:
+                                volume_num = int(float(volume_number))  # Handle volume numbers like "1.0"
+                                epub_filename = f"{manga_title} - Volume {volume_num:03d}{epub_ext}"
+                            except ValueError:
+                                # Handle non-numeric volume numbers
+                                epub_filename = f"{manga_title} - Volume {volume_number}{epub_ext}"
                     else:
                         # Standard filename with underscores for non-collection output
-                        epub_filename = f"{safe_title}{epub_ext}"
+                        # Special handling for ungrouped chapters
+                        if volume_number == "0":
+                            epub_filename = f"{safe_title}_ungrouped_chapters{epub_ext}"
+                        else:
+                            epub_filename = f"{safe_title}{epub_ext}"
                     
                     # builder_output_dir is already set above, so we don't need to modify it here
                         
