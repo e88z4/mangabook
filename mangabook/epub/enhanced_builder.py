@@ -30,11 +30,12 @@ logger = logging.getLogger(__name__)
 class EnhancedEPUBBuilder(EPUBBuilder):
     """EPUB Builder with strict EPUB spec compliance"""
     
-    def write(self, filename: Optional[str] = None) -> str:
+    def write(self, filename: Optional[str] = None, force_overwrite: bool = False) -> str:
         """Write the EPUB file directly using ZIP manipulation.
         
         Args:
             filename: Optional filename for the EPUB.
+            force_overwrite: Whether to overwrite existing files.
             
         Returns:
             str: Path to the written EPUB file.
@@ -61,71 +62,95 @@ class EnhancedEPUBBuilder(EPUBBuilder):
         if not filename.lower().endswith('.epub'):
             filename += ".epub"
         
-        # Generate the full path
-        filepath = self.output_dir / filename
+        # Get the self.output_dir as a Path object for construction
+        output_path = Path(self.output_dir)
         
-        try:
-            # Create a temporary directory for manual EPUB creation
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
+        # Determine the full path for the EPUB file
+        if filename:
+            # If filename contains a path separator, extract just the filename part
+            if os.path.sep in filename:
+                filename = os.path.basename(filename)
                 
-                # Create directories for EPUB structure
-                meta_inf_dir = temp_path / 'META-INF'
-                oebps_dir = temp_path / 'OEBPS'
-                meta_inf_dir.mkdir()
-                oebps_dir.mkdir()
+            epub_path = output_path / filename
+        else:
+            # Generate a filename from the title
+            safe_title = sanitize_filename(self.title)
+            epub_path = output_path / f"{safe_title}.epub"
+        
+        # Check if file already exists and not force_overwrite
+        if epub_path.exists() and not force_overwrite:
+            logger.warning(f"File already exists: {epub_path}. Use force_overwrite=True to overwrite.")
+            return str(epub_path)  # Return the path even though we didn't write to it
+        
+        # Create a temporary directory for the EPUB contents
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # Create the required directory structure
+            meta_inf_dir = temp_path / "META-INF"
+            meta_inf_dir.mkdir(exist_ok=True)
+            
+            oebps_dir = temp_path / "OEBPS"
+            oebps_dir.mkdir(exist_ok=True)
+            
+            # Create the mimetype file
+            with open(temp_path / "mimetype", 'w', encoding='utf-8') as f:
+                f.write("application/epub+zip")
+            
+            # Create the container.xml file
+            self._create_container_file(meta_inf_dir / "container.xml")
+            
+            # Extract all the book items to the OEBPS directory
+            self._extract_items_to_directory(oebps_dir)
+            
+            # Create the OPF file
+            self._create_opf_file(oebps_dir / "content.opf")
+            
+            # Create the NCX file
+            self._create_ncx_file(oebps_dir / "toc.ncx")
+            
+            # Create the Nav file
+            self._create_nav_file(oebps_dir / "nav.xhtml")
+            
+            # Create the ZIP file with the correct mimetype handling
+            # Make sure the parent directory exists
+            epub_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create the ZIP file
+            with zipfile.ZipFile(epub_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # Add the mimetype file first, uncompressed
+                zip_file.write(
+                    temp_path / "mimetype", 
+                    arcname="mimetype", 
+                    compress_type=zipfile.ZIP_STORED
+                )
                 
-                # Create mimetype file
-                with open(temp_path / 'mimetype', 'w', encoding='utf-8') as f:
-                    f.write('application/epub+zip')
-                
-                # Create container.xml
-                container_xml = """<?xml version="1.0" encoding="UTF-8"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-   <rootfiles>
-      <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
-   </rootfiles>
-</container>"""
-                
-                with open(meta_inf_dir / 'container.xml', 'w', encoding='utf-8') as f:
-                    f.write(container_xml)
-                
-                # Extract all items from the book
-                self._extract_items_to_directory(oebps_dir)
-                
-                # Create content.opf manually
-                self._create_opf_file(oebps_dir / 'content.opf')
-                
-                # Create toc.ncx manually
-                self._create_ncx_file(oebps_dir / 'toc.ncx')
-                
-                # Always create nav.xhtml manually to ensure it's correct
-                nav_path = oebps_dir / 'nav.xhtml'
-                self._create_nav_file(nav_path)
-                
-                # Create the EPUB file (ZIP)
-                with zipfile.ZipFile(filepath, 'w') as zip_file:
-                    # Add mimetype (must be first and uncompressed)
-                    zip_file.write(temp_path / 'mimetype', 'mimetype', compress_type=zipfile.ZIP_STORED)
+                # Add the rest of the files
+                for root, dirs, files in os.walk(temp_path):
+                    rel_path = os.path.relpath(root, temp_path)
                     
-                    # Add other files
-                    for root, _, files in os.walk(temp_path):
-                        for file in files:
-                            if file == 'mimetype':
-                                continue  # Already added
+                    for file in files:
+                        # Skip mimetype, we've already added it
+                        if file == "mimetype" and rel_path == '.':
+                            continue
                             
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, temp_path)
-                            arcname = arcname.replace(' ', '_')  # Replace spaces with underscores
-                            zip_file.write(file_path, arcname)
-                
-                logger.info(f"EPUB written to {filepath}")
-                return str(filepath)
-                
-        except Exception as e:
-            logger.error(f"Error writing EPUB: {e}")
-            traceback.print_exc()
-            raise ValueError(f"Error writing EPUB: {e}") from e
+                        file_path = os.path.join(root, file)
+                        
+                        if rel_path == '.':
+                            # Files in the root directory
+                            arc_name = file
+                        else:
+                            # Files in subdirectories
+                            arc_name = os.path.join(rel_path, file)
+                            
+                        # Use forward slashes for ZIP entries
+                        arc_name = arc_name.replace(os.path.sep, '/')
+                        
+                        # Add the file to the ZIP
+                        zip_file.write(file_path, arcname=arc_name)
+        
+        logger.info(f"EPUB written to {epub_path}")
+        return str(epub_path)
     
     def set_cover(self, image_path: Union[str, Path]) -> None:
         """Set the cover image for the EPUB.
@@ -303,6 +328,27 @@ class EnhancedEPUBBuilder(EPUBBuilder):
                 f.write(content)
         except Exception as e:
             logger.error(f"Error fixing references in {file_path}: {e}")
+    
+    def _create_container_file(self, container_path: Path) -> None:
+        """Create the container.xml file that points to the OPF file.
+        
+        Args:
+            container_path: Path to write the container.xml file.
+        """
+        container_content = """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+    <rootfiles>
+        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+    </rootfiles>
+</container>
+"""
+        try:
+            with open(container_path, 'w', encoding='utf-8') as f:
+                f.write(container_content)
+            logger.debug(f"Created container.xml at {container_path}")
+        except Exception as e:
+            logger.error(f"Error creating container.xml: {e}")
+            raise
     
     def _create_opf_file(self, opf_path: Path) -> None:
         """Create the content.opf file manually.
@@ -661,11 +707,12 @@ class EnhancedEPUBBuilder(EPUBBuilder):
 class EnhancedKepubBuilder(EnhancedEPUBBuilder, KepubBuilder):
     """Kobo EPUB Builder with strict EPUB spec compliance"""
     
-    def write(self, filename: Optional[str] = None) -> str:
+    def write(self, filename: Optional[str] = None, force_overwrite: bool = False) -> str:
         """Write the KEPUB file.
         
         Args:
             filename: Optional filename for the KEPUB.
+            force_overwrite: Whether to overwrite existing files.
             
         Returns:
             str: Path to the written KEPUB file.
@@ -682,7 +729,7 @@ class EnhancedKepubBuilder(EnhancedEPUBBuilder, KepubBuilder):
                 filename += ".kepub.epub"
         
         # Write the EPUB using the enhanced method
-        epub_path = super().write(filename)
+        epub_path = super().write(filename, force_overwrite)
         
         # Apply Kobo-specific modifications using the parent class method
         self._apply_kobo_modifications(epub_path)

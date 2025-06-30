@@ -259,13 +259,8 @@ class ChapterDownloader:
             file_exists = file_path.exists()
             file_valid = False
 
-            # Always print debug info for every image file (not just logger)
-            print(f"[PRINT-DEBUG] Checking local file: {file_path} (exists: {file_exists})")
             if file_exists:
                 file_valid = is_valid_image(file_path)
-                print(f"[PRINT-DEBUG] Local file {file_path} valid: {file_valid}")
-            else:
-                print(f"[PRINT-DEBUG] Local file {file_path} does not exist.")
 
             if file_exists and file_valid and check_local and not force_download:
                 logger.debug(f"Skipping download of valid local file: {file_path}")
@@ -390,6 +385,12 @@ class ChapterDownloader:
             if self.use_cache and volumes:
                 api_cache.set(cache_key, volumes)
         
+        # The API has already been modified to normalize "none" as "0" for ungrouped chapters
+        # This check is kept for redundancy
+        if volume_number == "0" and "0" not in volumes and "none" in volumes:
+            # Use "none" as the key for ungrouped chapters in the API response
+            volume_number = "none"
+        
         if not volumes or volume_number not in volumes:
             logger.error(f"Volume {volume_number} not found for manga {manga_title}")
             return {
@@ -415,9 +416,7 @@ class ChapterDownloader:
         
         # Create paths
         manga_path = generate_manga_path(self.output_dir, manga_title)
-        print(f"[DEBUG] downloader: manga_path={manga_path}")  # DEBUG
         volume_path = generate_volume_path(manga_path, volume_number)
-        print(f"[DEBUG] downloader: volume_path={volume_path}")  # DEBUG
         
         # Check for existing manifest or create new one
         manifest = None
@@ -469,7 +468,6 @@ class ChapterDownloader:
             manifest = update_manifest_chapter(manifest, chapter_manifest_data)
             
             # Save manifest after each chapter update
-            print(f"[DEBUG] downloader: save_manifest called with volume_path={volume_path}")  # DEBUG
             save_manifest(manifest, volume_path)
             
             job = {
@@ -499,7 +497,6 @@ class ChapterDownloader:
                     download_stats[key] += stats[key]
             
             # Save manifest after each chapter
-            print(f"[DEBUG] downloader: save_manifest called with volume_path={volume_path}")  # DEBUG
             save_manifest(manifest, volume_path)
             
             return {
@@ -522,7 +519,6 @@ class ChapterDownloader:
         successful_chapters = download_results["completed"]
         
         # Final manifest save
-        print(f"[DEBUG] downloader: save_manifest called with volume_path={volume_path}")  # DEBUG
         manifest["status"] = "complete" if successful_chapters == total_chapters else "incomplete"
         save_manifest(manifest, volume_path)
         

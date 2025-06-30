@@ -24,7 +24,7 @@ from .epub.image import ImageProcessor
 from .epub.builder import EPUBBuilder
 from .epub.kobo import KepubBuilder
 from .epub.enhanced_builder import EnhancedEPUBBuilder, EnhancedKepubBuilder
-from .utils import sanitize_filename, ensure_directory, generate_manga_path, generate_volume_path
+from .utils import sanitize_filename, ensure_directory, generate_manga_path, generate_volume_path, load_manifest
 from .error import error_handler, ErrorCategory, MangaBookError
 from .ui import (
     print_info, print_success, print_warning, print_error, 
@@ -40,7 +40,8 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                       output_dir: str, keep_raw: bool = False, quality: int = 85,
                       kobo: bool = True, use_enhanced_builder: bool = True, language: str = "en", 
                       validate: bool = True, check_local: bool = True, force_download: bool = False,
-                      use_official_covers: bool = True, create_kobo_collection: bool = True,
+                      force_overwrite: bool = False, use_official_covers: bool = True, 
+                      create_kobo_collection: bool = True,
                       collection_root: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """Download manga volumes and convert to EPUB.
     
@@ -57,6 +58,7 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         validate: Whether to validate generated EPUBs.
         check_local: Whether to check for existing files before downloading.
         force_download: Whether to force download even if local files exist.
+        force_overwrite: Whether to overwrite existing files (useful for updating ongoing manga).
         use_official_covers: Whether to use official MangaDex volume covers when available.
         create_kobo_collection: Whether to create a canonical Kobo collection folder.
         collection_root: Root directory for the manga collection. If not specified,
@@ -90,6 +92,10 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         output_dir = Path(output_dir)
         ensure_directory(output_dir)
         
+        # Create the manga-collection directory early to ensure it exists
+        manga_collection_dir = Path(output_dir) / "manga-collection"
+        ensure_directory(manga_collection_dir)
+        
         # Print manga title and volume info
         print_header(f"Processing Manga", width=60)
         print_manga_title(manga_title)
@@ -101,6 +107,8 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
             print_info("Local file checking: Enabled (will skip valid existing files)")
         if force_download:
             print_info("Force download: Enabled (will re-download all files)")
+        if force_overwrite:
+            print_info("Force overwrite: Enabled (will overwrite existing files)")
         
         # Step 2: Initialize downloader with parallel capabilities
         downloader = ChapterDownloader(
@@ -175,6 +183,9 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                 chapter_dirs = [d for d in volume_path.iterdir() if d.is_dir() and d.name.startswith("chapter_")]
                 # Group processed images by chapter
                 chapter_image_map = {}
+                
+                # Track if any chapter failed image processing
+                chapter_processing_failed = False
                 for chapter_dir in chapter_dirs:
                     # Process all images in the chapter
                     processed = error_handler.safe_execute(
@@ -185,7 +196,8 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                         display=True
                     )
                     if not processed:
-                        results["warnings"].append(f"Failed to process images in {chapter_dir.name}")
+                        results["warnings"].append(f"Failed to process images in {chapter_dir.name} (volume {volume_number})")
+                        chapter_processing_failed = True
                         continue
                     # Collect all processed images for this chapter
                     chapter_image_map[chapter_dir.name] = []
@@ -193,218 +205,116 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                         chapter_image_map[chapter_dir.name].extend(proc_files)
                 # Sort chapters by name (which should be in reading order)
                 sorted_chapters = sorted(chapter_image_map.items())
+
+                # If any chapter failed, mark the volume as failed and skip EPUB generation
+                if chapter_processing_failed:
+                    print_error(f"Failed to process images for one or more chapters in volume {volume_number}. Skipping EPUB generation.")
+                    results["failed"] += 1
+                    results["volumes"][volume_number]["error"] = "Image processing failed for one or more chapters."
+                    progress.update(1)
+                    continue
                 
-                # Step 3.3: Create EPUB
-                all_images = [img for _, imgs in sorted_chapters for img in imgs]
-                if all_images:
-                    # Get manga details for metadata
-                    api = await get_api()
-                    manga_data = await api.get_manga(manga_id)
+                # Step 3.3: Generate EPUB and KEPUB files
+                try:
+                    print_info(f"Generating EPUB/KEPUB files for volume {volume_number}...")
                     
-                    author = "Unknown"
-                    if manga_data and "attributes" in manga_data:
-                        author = manga_data["attributes"].get("author", author)
+                    # Get chapter info from manifest for metadata
+                    volume_manifest = load_manifest(volume_path)
+                    chapter_data = volume_manifest.get("chapters", {})
                     
-                    # Prepare volume title
-                    vol_title = f"{manga_title} - Volume {volume_number}"
-                    
-                    # Create safe filename
-                    safe_title = sanitize_filename(vol_title)
-                    
-                    # Determine cover image
-                    cover_image = None
-                    
-                    # Use official MangaDex cover if enabled
-                    if use_official_covers:
-                        # Get the official MangaDex cover for this volume
-                        official_cover_url = await api.get_volume_cover_art(manga_id, volume_number)
-                        if official_cover_url:
-                            # Download the official cover
-                            official_cover_path = volume_path / "official_cover.jpg"
-                            downloaded_cover = await api.download_cover_image(official_cover_url, official_cover_path)
-                            if downloaded_cover:
-                                cover_image = official_cover_path
-                                logger.info(f"Using official MangaDex cover for volume {volume_number}")
-                    
-                    # Fall back to the first image if no official cover or feature disabled
-                    if not cover_image:
-                        if use_official_covers:
-                            logger.info(f"No official cover found, using first image as cover")
-                        else:
-                            logger.info(f"Official covers disabled, using first image as cover")
-                        cover_image = all_images[0] if all_images else None
-                    
-                    # Get reading direction from image processor
-                    reading_direction = img_processor.detect_reading_direction(volume_path)
-                    
-                    # Create EPUB
-                    if use_enhanced_builder:
-                        # Use the enhanced builder that handles large manga volumes better
-                        if kobo:
-                            # Create Kobo EPUB with enhanced builder
-                            builder_class = EnhancedKepubBuilder
-                            epub_ext = ".kepub.epub"
-                        else:
-                            # Create standard EPUB with enhanced builder
-                            builder_class = EnhancedEPUBBuilder
-                            epub_ext = ".epub"
-                    else:
-                        # Use the original builders
-                        if kobo:
-                            # Create Kobo EPUB
-                            builder_class = KepubBuilder
-                            epub_ext = ".kepub.epub"
-                        else:
-                            # Create standard EPUB
-                            builder_class = EPUBBuilder
-                            epub_ext = ".epub"
-                    
-                    # Determine the output directory and filename based on collection settings
-                    builder_output_dir = output_dir
-                    
-                    # If we're creating a Kobo collection, prepare the collection directory
-                    if kobo and create_kobo_collection:
-                        # Create collection root if specified, otherwise use default
-                        coll_root = Path(collection_root) if collection_root else Path(output_dir) / "manga-collection"
-                        # Create manga-specific directory inside the collection root
-                        manga_coll_dir = coll_root / sanitize_filename(manga_title)
-                        ensure_directory(manga_coll_dir)
-                        # Set the builder to output to the manga collection directory
-                        builder_output_dir = manga_coll_dir
-                        
-                        # For collections, use a more reader-friendly filename format
-                        # Special handling for ungrouped chapters
-                        if volume_number == "0":
-                            # For ungrouped chapters, use a special naming convention
-                            chapter_numbers = []
-                            for chapter_name, _ in sorted_chapters:
-                                # Try to extract chapter number from the chapter name
-                                try:
-                                    chapter_num = chapter_name.split()[1]  # Assuming format "Chapter X"
-                                    chapter_numbers.append(chapter_num)
-                                except (IndexError, ValueError):
-                                    pass
-                            
-                            # Create a range or list of chapter numbers
-                            if chapter_numbers:
-                                if len(chapter_numbers) == 1:
-                                    chapter_range = chapter_numbers[0]
-                                else:
-                                    chapter_range = f"{chapter_numbers[0]}-{chapter_numbers[-1]}"
-                                epub_filename = f"{manga_title} - Chapters {chapter_range}{epub_ext}"
-                            else:
-                                epub_filename = f"{manga_title} - Ungrouped Chapters{epub_ext}"
-                        else:
-                            try:
-                                volume_num = int(float(volume_number))  # Handle volume numbers like "1.0"
-                                epub_filename = f"{manga_title} - Volume {volume_num:03d}{epub_ext}"
-                            except ValueError:
-                                # Handle non-numeric volume numbers
-                                epub_filename = f"{manga_title} - Volume {volume_number}{epub_ext}"
-                    else:
-                        # Standard filename with underscores for non-collection output
-                        # Special handling for ungrouped chapters
-                        if volume_number == "0":
-                            epub_filename = f"{safe_title}_ungrouped_chapters{epub_ext}"
-                        else:
-                            epub_filename = f"{safe_title}{epub_ext}"
-                    
-                    # builder_output_dir is already set above, so we don't need to modify it here
-                        
-                    builder = builder_class(
-                        title=vol_title,
-                        output_dir=builder_output_dir,  # This now correctly points to either the collection dir or main output dir
-                        language=language,
-                        author=author
-                    )
-                    
-                    # Always set reading direction to rtl (right-to-left) for manga
-                    builder.set_reading_direction('rtl')
-                    
-                    # Set cover if available
-                    if cover_image:
-                        builder.set_cover(cover_image)
-                        
-                        # If the cover is the first image and the official MangaDex cover wasn't used,
-                        # exclude it from the content to avoid duplication
-                        if cover_image == all_images[0]:
-                            content_images = all_images[1:]
-                        else:
-                            content_images = all_images
-                    else:
-                        content_images = all_images
-                    
-                    # Add chapters and images
+                    # Prepare images in reading order
+                    all_images = []
                     for chapter_name, images in sorted_chapters:
-                        if images:
-                            # If this chapter contains the cover image that was already used as the cover,
-                            # and it's the first image of the chapter, remove it to avoid duplication
-                            chapter_images = images
-                            if cover_image and images and cover_image == images[0]:
-                                chapter_images = images[1:]
-                                
-                            if chapter_images:
-                                builder.add_chapter(chapter_name, chapter_name, chapter_images)
+                        all_images.extend(sorted(images))
                     
-                    # The epub_filename is already set above based on collection settings
-                        
-                    # Pass just the filename to builder.write, which will combine it with its output_dir
-                    epub_path = error_handler.safe_execute(
-                        builder.write,
-                        epub_filename,
-                        error_category=ErrorCategory.FILE_SYSTEM,
-                        display=True
-                    )
-                    
-                    if not epub_path:
-                        click.echo(f"Failed to create EPUB for volume {volume_number}")
+                    if not all_images:
+                        print_error(f"No valid images found for volume {volume_number}")
                         results["failed"] += 1
+                        results["volumes"][volume_number]["error"] = "No valid images found"
                         progress.update(1)
                         continue
-                        
-                    click.echo(f"Created {epub_path}")
-                    results["epub_files"].append(epub_path)
                     
-                    # Validate EPUB if requested
-                    if validate:
-                        click.echo(f"Validating {epub_path}...")
-                        validation_result = await validate_epub(epub_path)
-                        results["validation_results"][epub_path] = validation_result
-                        
-                        if validation_result.get("valid") is False:
-                            click.secho(f"⚠️  Validation failed for {epub_path}", fg="yellow")
-                            if "error" in validation_result:
-                                click.echo(f"  Error: {validation_result['error']}")
-                        elif validation_result.get("valid") is True:
-                            click.secho(f"✅ Validation passed for {epub_path}", fg="green")
-                        else:
-                            click.echo(f"⚠️  Could not validate {epub_path}")
+                    # Create standard EPUB
+                    epub_filename = f"{sanitize_filename(manga_title)}_vol_{volume_number}.epub"
                     
-                    # Delete raw files if not keeping them
-                    if not keep_raw:
-                        for chapter_dir in chapter_dirs:
-                            try:
-                                shutil.rmtree(chapter_dir)
-                            except Exception as e:
-                                logger.warning(f"Could not delete directory {chapter_dir}: {e}")
+                    # Use manga_collection_dir for the epub_path
+                    epub_path = manga_collection_dir / epub_filename
+                    
+                    epub_builder = EnhancedEPUBBuilder(
+                        title=f"{manga_title} - Volume {volume_number}",
+                        author=f"MangaDex ID: {manga_id}",
+                        language=language,
+                        identifier=f"mangadex:{manga_id}:vol:{volume_number}",
+                        output_dir=manga_collection_dir  # Pass the manga collection directory as output_dir
+                    )
+                    
+                    # Add all images to EPUB
+                    for img_path in all_images:
+                        epub_builder.add_image(img_path)
+                    
+                    # Write EPUB file
+                    epub_output = epub_builder.write(str(epub_path), force_overwrite=force_overwrite)
+                    results["epub_files"].append(epub_output)
+                    
+                    # Create Kobo-compatible KEPUB if requested
+                    if kobo:
+                        kepub_filename = f"{sanitize_filename(manga_title)}_vol_{volume_number}.kepub.epub"
+                        # Use manga_collection_dir for kepub_path for consistency with output_dir
+                        kepub_path = manga_collection_dir / kepub_filename
                         
-                        # Delete processed directory
-                        try:
-                            shutil.rmtree(processed_dir)
-                        except Exception as e:
-                            logger.warning(f"Could not delete directory {processed_dir}: {e}")
-                else:
-                    click.secho(f"⚠️  No processed images found for volume {volume_number}", fg="yellow")
-                    results["warnings"].append(f"No processed images found for volume {volume_number}")
-                    results["skipped"] += 1
+                        kepub_builder = EnhancedKepubBuilder(
+                            title=f"{manga_title} - Volume {volume_number}",
+                            author=f"MangaDex ID: {manga_id}",
+                            language=language,
+                            identifier=f"mangadex:{manga_id}:vol:{volume_number}",
+                            output_dir=manga_collection_dir  # Pass the manga collection directory as output_dir
+                        )
+                        
+                        # Add all images to KEPUB
+                        for img_path in all_images:
+                            kepub_builder.add_image(img_path)
+                        
+                        # Write KEPUB file
+                        kepub_output = kepub_builder.write(str(kepub_path), force_overwrite=force_overwrite)
+                        results["epub_files"].append(kepub_output)
+                        
+                        # If collection folder specified, create a more readable structure
+                        if create_kobo_collection:
+                            # Use specified collection_root or default to {output_dir}/manga-collection
+                            root_dir = Path(collection_root) if collection_root else Path(output_dir) / "manga-collection"
+                            kobo_dir = root_dir / sanitize_filename(manga_title)
+                            
+                            # Create parent directories
+                            ensure_directory(kobo_dir)
+                            
+                            # Create a readable filename for the collection
+                            readable_name = manga_title.replace('_', ' ')
+                            collection_filename = f"{readable_name} - Volume {volume_number}.kepub.epub"
+                            collection_path = kobo_dir / collection_filename
+                            
+                            # Only need to copy the file if the paths are different
+                            if str(kepub_path) != str(collection_path):
+                                shutil.copy2(kepub_path, collection_path)
+                                logger.info(f"Copied KEPUB to collection: {collection_path}")
+                                # Add this file to the results too
+                                results["epub_files"].append(str(collection_path))
+                    
+                    print_success(f"Generated EPUB files for volume {volume_number}")
+                    
+                except Exception as epub_error:
+                    error = error_handler.handle(epub_error, category=ErrorCategory.CONVERSION)
+                    error_handler.display_error(error)
+                    logger.error(f"Error generating EPUB for volume {volume_number}: {epub_error}")
+                    results["volumes"][volume_number]["error"] = f"EPUB generation failed: {str(epub_error)}"
+                    results["failed"] += 1
                     progress.update(1)
                     continue
             
-            except Exception as e:
-                error = error_handler.handle(e, category=ErrorCategory.UNEXPECTED)
+            except Exception as volume_error:
+                error = error_handler.handle(volume_error, category=ErrorCategory.UNEXPECTED)
                 error_handler.display_error(error)
-                logger.error(f"Error processing volume {volume_number}: {e}")
-                results["volumes"][volume_number]["error"] = str(e)
+                logger.error(f"Error processing volume {volume_number}: {volume_error}")
+                results["volumes"][volume_number]["error"] = str(volume_error)
                 results["failed"] += 1
                 progress.update(1)
                 continue
@@ -512,11 +422,8 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
         # Always ensure resources are properly cleaned up
         if 'downloader' in locals():
             await downloader.close()
-        
-        return {
-            **results,
-            "error": str(e)
-        }
+            
+        # Note: Don't try to access exception variables here
     
 
 def display_results_summary(results: Dict[str, Any]) -> None:

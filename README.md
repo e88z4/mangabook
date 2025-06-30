@@ -28,11 +28,15 @@ A Python console application to download manga from MangaDex and create Kobo-com
 - **NEW:** Support for large manga volumes through robust navigation handling
 - **NEW:** Options to use either standard or enhanced builders
 - **NEW:** Proper cover handling and epubcheck validation
+- **NEW:** Fixed EPUB/KEPUB generation for both regular volumes and ungrouped chapters
+- **NEW:** Improved ungrouped chapter handling and text-based cover generation
 - **NEW:** Official MangaDex volume cover integration - uses the correct cover art for each volume
 - **NEW:** Canonical Kobo collection folders for easy device upload - organizes all .kepub.epub files in one place
 - **NEW:** Improved search functionality across all languages
 - **NEW:** Support for downloading ungrouped chapters (chapters not assigned to volumes)
 - **NEW:** Language selection from available translations for each manga
+- **NEW:** Automatic updates for ongoing manga with the --updates flag (overwrite existing files with new chapters)
+- **NEW:** File history lifecycle management (keeps download history for the last 30 days only)
 
 ## Requirements
 
@@ -118,6 +122,18 @@ mangabook search "Detective Conan"
 
 # Download specific volumes
 mangabook download MANGA_ID --volumes "1-10"
+
+# Download only ungrouped chapters
+mangabook download MANGA_ID --ungrouped
+
+# Download only ungrouped chapters
+mangabook download MANGA_ID --ungrouped
+
+# Download and update ungrouped chapters (overwrites existing files)
+mangabook download MANGA_ID --updates
+
+# Force overwrite existing files
+mangabook download MANGA_ID --force-overwrite
 
 # Download with specific options
 mangabook download MANGA_ID --volumes "1,3,5" --language en --kobo --quality 85 --use-enhanced-builder

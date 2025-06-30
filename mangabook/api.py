@@ -319,7 +319,13 @@ class MangaDexAPI:
         await client._ensure_session()
         async with client.session.get(f"{client.base_url}{url}", params=params) as response:
             response_data = await response.json()
-            return response_data.get("volumes", {})
+            volumes = response_data.get("volumes", {})
+            
+            # Normalize volume keys: ensure "none" key is also available as "0" for ungrouped chapters
+            if "none" in volumes and "0" not in volumes:
+                volumes["0"] = volumes["none"]
+            
+            return volumes
     
     async def login(self, username: str, password: str,
                 client_id: Optional[str] = None,

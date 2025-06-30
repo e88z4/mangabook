@@ -12,7 +12,7 @@ import html
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Callable, Optional, TypeVar, Union
+from typing import List, Dict, Any, Callable, Optional, TypeVar, Union, Tuple
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -437,7 +437,6 @@ def save_manifest(manifest: Dict[str, Any], volume_path: Union[str, Path]) -> bo
         bool: True if successful, False otherwise.
     """
     path = Path(volume_path) / "manifest.json"
-    print(f"[DEBUG] save_manifest: Saving manifest to {path}")  # DEBUG
     try:
         # Update the last_updated timestamp
         manifest["last_updated"] = datetime.now().isoformat()
@@ -445,10 +444,8 @@ def save_manifest(manifest: Dict[str, Any], volume_path: Union[str, Path]) -> bo
         # Write the manifest to file
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
-        print(f"[DEBUG] save_manifest: Successfully saved manifest to {path}")  # DEBUG
         return True
     except Exception as e:
-        print(f"[DEBUG] save_manifest: Failed to save manifest to {path}: {e}")  # DEBUG
         logger.error(f"Failed to save manifest to {path}: {e}")
         return False
 
@@ -668,3 +665,93 @@ def validate_chapter_files(
     except Exception as e:
         logger.error(f"Error validating chapter files: {e}")
         return results
+
+
+def generate_text_cover(title: str, subtitle: str = None, output_path: Path = None, size: Tuple[int, int] = (800, 1200), 
+                       bg_color: Tuple[int, int, int] = (240, 240, 240), 
+                       text_color: Tuple[int, int, int] = (40, 40, 40)) -> Optional[Path]:
+    """Generate a text-based cover image with manga title and chapter information.
+    
+    Args:
+        title: The main title (manga name).
+        subtitle: Optional subtitle (e.g., "Ungrouped Chapters 45-50").
+        output_path: The path where the cover image will be saved.
+        size: Image dimensions as (width, height).
+        bg_color: Background color as RGB tuple.
+        text_color: Text color as RGB tuple.
+        
+    Returns:
+        Path to the generated cover image, or None if failed.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import tempfile
+        
+        # Create a new image with the given background color
+        img = Image.new('RGB', size, bg_color)
+        draw = ImageDraw.Draw(img)
+        
+        # Estimate font sizes based on image dimensions
+        title_font_size = int(size[0] / 15)  # Adjust based on image width
+        subtitle_font_size = int(title_font_size * 0.7)  # Subtitle is 70% of title size
+        
+        # Try to use a nice font if available, otherwise fall back to default
+        try:
+            # Try some common fonts, starting with preferred ones
+            font_candidates = [
+                'DejaVuSans.ttf', 'Arial.ttf', 'Verdana.ttf', 'Helvetica.ttf', 
+                'FreeSans.ttf', 'LiberationSans-Regular.ttf'
+            ]
+            
+            title_font = None
+            for font_name in font_candidates:
+                try:
+                    title_font = ImageFont.truetype(font_name, title_font_size)
+                    break
+                except (OSError, IOError):
+                    continue
+                    
+            if title_font is None:
+                # Fall back to default font
+                title_font = ImageFont.load_default()
+                subtitle_font = ImageFont.load_default()
+            else:
+                # Use the same font family for subtitle but smaller
+                subtitle_font = ImageFont.truetype(font_name, subtitle_font_size)
+                
+        except Exception as e:
+            logger.warning(f"Failed to load font: {e}, using default")
+            title_font = ImageFont.load_default()
+            subtitle_font = ImageFont.load_default()
+            
+        # Calculate text positions for centering
+        text_width = draw.textlength(title, font=title_font)
+        title_x = (size[0] - text_width) / 2
+        title_y = size[1] / 3  # Position at 1/3 from the top
+        
+        # Draw the title
+        draw.text((title_x, title_y), title, fill=text_color, font=title_font)
+        
+        # Draw the subtitle if provided
+        if subtitle:
+            subtitle_width = draw.textlength(subtitle, font=subtitle_font)
+            subtitle_x = (size[0] - subtitle_width) / 2
+            subtitle_y = title_y + title_font_size * 1.5  # Position below title
+            draw.text((subtitle_x, subtitle_y), subtitle, fill=text_color, font=subtitle_font)
+        
+        # If no output path provided, create a temporary file
+        if not output_path:
+            temp_dir = tempfile.mkdtemp()
+            output_path = Path(temp_dir) / "cover.jpg"
+        
+        # Create parent directory if it doesn't exist
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save the image
+        img.save(output_path, "JPEG", quality=95)
+        logger.info(f"Generated text cover at {output_path}")
+        
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to generate text cover: {e}")
+        return None

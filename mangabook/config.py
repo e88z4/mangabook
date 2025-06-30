@@ -19,6 +19,15 @@ DEFAULT_CONFIG = {
     "keep_raw_files": False,
     "image_quality": 85,
     "default_language": "en",
+    "kobo_compatible": True,
+    "use_enhanced_builder": True,
+    "use_official_covers": True,
+    "create_kobo_collection": True,
+    "validate_epub": True,
+    "check_local": True,
+    "force_download": False,
+    "download_prefs_saved": False,  # Flag to indicate if download preferences have been saved
+    "has_attempted_login": False,    # Flag to indicate if login has been attempted
 }
 
 # Constants
@@ -197,8 +206,55 @@ class Config:
         """
         output_dir = self.get("output_directory")
         os.makedirs(output_dir, exist_ok=True)
+        
+        # Also ensure manga-collection directory exists
+        manga_collection_dir = os.path.join(output_dir, "manga-collection")
+        os.makedirs(manga_collection_dir, exist_ok=True)
+        
         return output_dir
     
     def get_config_dir(self) -> str:
         """Return the path to the configuration directory."""
         return str(CONFIG_DIR)
+    
+    def get_download_preferences(self) -> Dict[str, Any]:
+        """Get all download preferences.
+        
+        Returns:
+            Dict[str, Any]: Dictionary with all download preferences.
+        """
+        return {
+            "keep_raw": self.get("keep_raw_files", False),
+            "quality": self.get("image_quality", 85),
+            "kobo": self.get("kobo_compatible", True),
+            "use_enhanced_builder": self.get("use_enhanced_builder", True),
+            "use_official_covers": self.get("use_official_covers", True),
+            "create_kobo_collection": self.get("create_kobo_collection", True),
+            "validate": self.get("validate_epub", True),
+            "check_local": self.get("check_local", True),
+            "force_download": self.get("force_download", False),
+        }
+    
+    def save_download_preferences(self, preferences: Dict[str, Any]) -> bool:
+        """Save download preferences.
+        
+        Args:
+            preferences: Dictionary with download preferences to save.
+            
+        Returns:
+            bool: True if saving was successful, False otherwise.
+        """
+        # Map from CLI parameter names to config names where they differ
+        mapping = {
+            "keep_raw": "keep_raw_files",
+            "quality": "image_quality",
+            "validate": "validate_epub",
+            "kobo": "kobo_compatible"
+        }
+        
+        updates = {}
+        for key, value in preferences.items():
+            config_key = mapping.get(key, key)
+            updates[config_key] = value
+            
+        return self.update(updates)

@@ -74,8 +74,33 @@ class MangaHistory:
                 "last_updated": datetime.now().isoformat()
             }
     
-    def _save_history(self) -> None:
-        """Save history to file."""
+    def _save_history(self, auto_prune: bool = True) -> None:
+        """Save history to file.
+        
+        Args:
+            auto_prune: Whether to automatically prune old entries.
+        """
+        # Automatically prune old entries (older than 30 days)
+        if auto_prune:
+            # Check if we need to prune based on config or last prune time
+            last_prune = self.history_data.get("last_prune")
+            needs_prune = False
+            
+            if not last_prune:
+                needs_prune = True
+            else:
+                try:
+                    last_prune_date = datetime.fromisoformat(last_prune)
+                    # Prune if last prune was more than a day ago
+                    if datetime.now() - last_prune_date > timedelta(days=1):
+                        needs_prune = True
+                except (ValueError, TypeError):
+                    needs_prune = True
+                    
+            if needs_prune:
+                self.prune_history(30)  # Keep entries from last 30 days
+                self.history_data["last_prune"] = datetime.now().isoformat()
+        
         try:
             with open(self.history_file, "w") as f:
                 json.dump(self.history_data, f, indent=2)
@@ -269,6 +294,46 @@ class MangaHistory:
             self._save_history()
             return True
         return False
+    
+    def prune_history(self, days: int = 30) -> int:
+        """Remove download history entries older than specified days.
+        
+        Args:
+            days: Remove entries older than this many days.
+            
+        Returns:
+            Number of entries removed.
+        """
+        if not self.history_data or not self.history_data.get("manga"):
+            return 0
+            
+        now = datetime.now()
+        cutoff_date = now - timedelta(days=days)
+        cutoff_iso = cutoff_date.isoformat()
+        
+        entries_removed = 0
+        
+        # Iterate through all manga entries
+        for manga_id, manga_entry in self.history_data["manga"].items():
+            if "downloads" not in manga_entry:
+                continue
+                
+            # Filter downloads, keeping only those newer than cutoff date
+            original_count = len(manga_entry["downloads"])
+            manga_entry["downloads"] = [
+                download for download in manga_entry["downloads"]
+                if download.get("timestamp", "0") > cutoff_iso
+            ]
+            
+            # Count removed entries
+            entries_removed += original_count - len(manga_entry["downloads"])
+            
+        # Save updated history if any entries were removed
+        if entries_removed > 0:
+            logger.info(f"Pruned {entries_removed} download history entries older than {days} days")
+            self._save_history()
+            
+        return entries_removed
 
 
 # Global instance

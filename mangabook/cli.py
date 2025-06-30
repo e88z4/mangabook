@@ -4,8 +4,6 @@ This module provides the CLI functionality for the MangaBook application,
 including manga search, selection, and display features.
 """
 
-print("[DEBUG] cli.py: CLI entry point reached")  # DEBUG
-
 import asyncio
 import logging
 import re
@@ -38,23 +36,24 @@ VOLUME_RANGE_PATTERN = re.compile(r'^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$')
 VOLUME_LIST_PATTERN = re.compile(r'^(\d+(?:\.\d+)?)(?:,(\d+(?:\.\d+)?))*$')
 
 
-async def search_manga(query: str, language: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+async def search_manga(query: str, language: Optional[str] = None, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
     """Search for manga by title.
     
     Args:
         query: The search query.
         language: Optional language filter for content (not for search).
         limit: Maximum number of results.
+        offset: Number of results to skip (for pagination).
         
     Returns:
         List of manga search results.
     """
-    logger.info(f"Searching for manga: {query}")
+    logger.info(f"Searching for manga: {query} (offset: {offset}, limit: {limit})")
     
     api = await get_api()
     try:
         # Search without restricting by language to get all potential matches
-        response = await api.search_manga(query, limit=limit, language=None)
+        response = await api.search_manga(query, limit=limit, offset=offset, language=None)
         
         results = []
         for manga in response.get("data", []):
@@ -117,11 +116,13 @@ async def search_manga(query: str, language: Optional[str] = None, limit: int = 
         await api.close()
 
 
-def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
+def display_manga_search_results(results: List[Dict[str, Any]], page: int = 1, limit: int = 10) -> None:
     """Display manga search results in a table format.
     
     Args:
         results: List of manga search results.
+        page: Current page number.
+        limit: Number of results per page.
     """
     if not results:
         click.secho("No results found.", fg="yellow")
@@ -136,8 +137,11 @@ def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
         available_langs = manga.get("available_languages", set())
         langs_str = ", ".join(sorted(available_langs)) if available_langs else "None"
         
+        # Calculate item number based on page and limit
+        item_num = ((page - 1) * limit) + i + 1
+        
         rows.append([
-            str(i + 1),
+            str(item_num),
             truncate_string(manga.get("title", "Unknown"), 50),
             manga.get("original_language", "unknown"),
             truncate_string(langs_str, 20),
@@ -148,7 +152,7 @@ def display_manga_search_results(results: List[Dict[str, Any]]) -> None:
     
     # Create and display table
     table = create_table(headers, rows)
-    click.echo("\nSearch Results:\n")
+    click.echo(f"\nSearch Results (Page {page}):\n")
     click.echo(table)
 
 
@@ -324,7 +328,8 @@ async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str
     
     api = await get_api()
     try:
-        chapters = await api.get_chapters(manga_id, language=language)
+        # Use get_all_chapters instead of get_chapters to handle pagination
+        chapter_list = await api.get_all_chapters(manga_id, language=language)
         
         volumes = {}
         
@@ -336,7 +341,7 @@ async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str
             "display_name": "Ungrouped Chapters"
         }
         
-        for chapter in chapters.get("data", []):
+        for chapter in chapter_list:
             attributes = chapter.get("attributes", {})
             volume = attributes.get("volume") or "0"  # Use "0" for chapters without a volume
             chapter_num = attributes.get("chapter") or "Unknown"
@@ -350,7 +355,8 @@ async def get_volumes(manga_id: str, language: str = "en") -> Dict[str, Dict[str
                     "display_name": f"Volume {volume}"
                 }
             elif volume == "0":
-                volumes[volume]["display_name"] = "Ungrouped Chapters"  # Ensure ungrouped chapters have correct name
+                # Special handling for ungrouped chapters
+                volumes[volume]["display_name"] = "Ungrouped Chapters"
             
             # Extract scanlation group
             for relationship in chapter.get("relationships", []):
@@ -395,27 +401,41 @@ def display_volumes(volumes: Dict[str, Dict[str, Any]]) -> None:
     
     click.echo("\nAvailable Volumes:")
     
+    # Custom sort key function for proper numeric sorting of volumes
+    def volume_sort_key(volume_item):
+        vol = volume_item[0]
+        # Handle special case for ungrouped chapters
+        if vol == "0":
+            return float('inf')  # Place at the end
+        
+        # Try to convert to float for numeric sorting, fall back to string if not possible
+        try:
+            return float(vol)
+        except ValueError:
+            return vol
+    
     # Sort volumes numerically
-    sorted_volumes = sorted(
-        volumes.items(),
-        key=lambda x: float(x[0]) if x[0].replace(".", "").isdigit() else float("inf")
-    )
+    sorted_volumes = sorted(volumes.items(), key=volume_sort_key)
+    
+    # Debug output for volume sorting validation
+    logger.debug(f"Sorted volumes: {[v[0] for v in sorted_volumes]}")
+    
+    # Debug output for volume sorting validation
+    logger.debug(f"Sorted volumes: {[v[0] for v in sorted_volumes]}")
     
     for volume, data in sorted_volumes:
         if volume == "0":
             volume_text = "Ungrouped Chapters"
-            click.secho(f"\n{volume_text}", fg="bright_yellow", bold=True)
         elif volume == "null" or volume == "None":
             volume_text = "Unknown Volume"
-            click.secho(f"\n{volume_text}", fg="yellow", bold=True)
         else:
             volume_text = f"Volume {volume}"
-            click.secho(f"\n{volume_text}", fg="bright_blue", bold=True)
         
+        click.secho(f"\n{volume_text}", fg="bright_blue", bold=True)
         click.echo(f"Chapters: {data['count']}")
         
         if data.get("scanlation_groups"):
-            groups = ", ".join(data["scanlation_groups"])
+            groups = ", ".join(sorted(data["scanlation_groups"]))
             click.echo(f"Scanlation Group(s): {groups}")
         
         # List chapters
@@ -508,9 +528,19 @@ def volume_selection_prompt(volumes: Dict[str, Dict[str, Any]]) -> Set[str]:
             available_volumes.append(volume)
     
     # Sort volumes numerically
-    available_volumes.sort(
-        key=lambda x: float(x) if x.replace(".", "").isdigit() else float("inf")
-    )
+    def volume_sort_key(vol):
+        try:
+            return float(vol)
+        except ValueError:
+            return float('inf')  # Non-numeric volumes go at the end
+            
+    available_volumes.sort(key=volume_sort_key)
+    
+    # Debug output to check volume sorting
+    logger.debug(f"Available volumes for selection (sorted): {available_volumes}")
+    
+    # Debug output to check volume sorting
+    logger.debug(f"Available volumes for selection (sorted): {available_volumes}")
     
     # Add ungrouped chapters at the end if they exist
     if has_ungrouped:
@@ -621,7 +651,7 @@ def cli(ctx, debug, log_dir):
 @cli.command()
 @click.argument('query')
 @click.option('--language', '-l', help="Language for results (e.g., 'ja' for Japanese, 'en' for English)")
-@click.option('--limit', default=10, help="Maximum number of results")
+@click.option('--limit', default=20, help="Maximum number of results per page")
 @click.pass_context
 def search(ctx, query, language, limit):
     """Search for manga by title.
@@ -629,6 +659,7 @@ def search(ctx, query, language, limit):
     Examples:
       mangabook search "one piece"
       mangabook search "naruto" --language ja
+      mangabook search "dragon ball" --limit 30
     """
     asyncio.run(search_command(query, language, limit))
 
@@ -651,6 +682,8 @@ def info(ctx, manga_id, language):
 @cli.command()
 @click.argument('manga_id')
 @click.option('--volumes', '-v', help="Volumes to download (e.g., '1,3-5,7')")
+@click.option('--ungrouped', is_flag=True, help="Download only ungrouped chapters")
+@click.option('--updates', is_flag=True, help="Download only ungrouped chapters and overwrite existing files (shortcut for --ungrouped --force-overwrite)")
 @click.option('--language', '-l', default='en', help="Language for translation")
 @click.option('--output', '-o', help="Output directory")
 @click.option('--keep-raw', is_flag=True, help="Keep raw downloaded files")
@@ -663,10 +696,11 @@ def info(ctx, manga_id, language):
 @click.option('--no-validate', is_flag=True, help="Skip EPUB validation")
 @click.option('--check-local', is_flag=True, default=True, help="Check for valid local files before downloading")
 @click.option('--force-download', is_flag=True, help="Force download even if local files exist")
+@click.option('--force-overwrite', is_flag=True, help="Force overwrite existing files (useful for updating ongoing manga)")
 @click.pass_context
-def download(ctx, manga_id, volumes, language, output, keep_raw, quality, kobo, 
+def download(ctx, manga_id, volumes, ungrouped, updates, language, output, keep_raw, quality, kobo, 
              use_enhanced_builder, use_official_covers, create_kobo_collection, collection_root,
-             no_validate, check_local, force_download):
+             no_validate, check_local, force_download, force_overwrite):
     """Download manga volumes and convert to EPUB.
     
     MANGA_ID is the MangaDex ID of the manga.
@@ -674,25 +708,44 @@ def download(ctx, manga_id, volumes, language, output, keep_raw, quality, kobo,
     Examples:
       mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1-10"
       mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1,3,5"
+      mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --ungrouped
+      mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --updates
       mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1-3" --check-local
       mangabook download 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0 --volumes "1-3" --collection-root "/path/to/collection"
     """
-    print(f"[DEBUG] cli.py: download command called with manga_id={manga_id}, volumes={volumes}, output={output}")  # DEBUG
     config = ctx.obj['CONFIG']
     
     # Use config values if options not provided
     if not output:
         output = config.get_output_dir()
     
+    # Handle the updates flag (shortcut for --ungrouped --force-overwrite)
+    if updates:
+        ungrouped = True
+        force_overwrite = True
+    
     # If force_download is specified, disable check_local
     if force_download:
         check_local = False
     
-    asyncio.run(download_command(
-        manga_id, volumes, language, output, keep_raw, quality, kobo,
-        use_enhanced_builder, use_official_covers, create_kobo_collection, 
-        collection_root, not no_validate, check_local, force_download
-    ))
+    # If ungrouped flag is set, override volumes to download only ungrouped chapters
+    if ungrouped:
+        volumes = "0"
+    
+    # Run the download command with proper error handling
+    try:
+        asyncio.run(download_command(
+            manga_id, volumes, language, output, keep_raw, quality, kobo,
+            use_enhanced_builder, use_official_covers, create_kobo_collection, 
+            collection_root, not no_validate, check_local, force_download,
+            force_overwrite
+        ))
+    except Exception as e:
+        # If an exception occurs in the asyncio.run, catch it here
+        error_msg = str(e)
+        logger.error(f"Error in download command wrapper: {error_msg}")
+        click.secho(f"Error: {error_msg}", fg="red")
+        sys.exit(1)
 
 
 @cli.command()
@@ -807,8 +860,24 @@ async def search_command(query: str, language: Optional[str], limit: int) -> Non
     """Implementation of the search command."""
     try:
         click.echo(f"Searching for: {query}")
-        results = await search_manga(query, language, limit)
-        display_manga_search_results(results)
+        offset = 0
+        page = 1
+        
+        while True:
+            results = await search_manga(query, language, limit, offset)
+            display_manga_search_results(results, page, limit)
+            
+            # Check if there might be more results
+            if len(results) >= limit:
+                more_results = click.confirm(f"\nThere might be more results. View page {page + 1}?", default=False)
+                if more_results:
+                    offset += limit
+                    page += 1
+                    continue
+                    
+            # No more results or user doesn't want more
+            break
+            
     except Exception as e:
         error = error_handler.handle(e, category=ErrorCategory.NETWORK)
         error_handler.display_error(error)
@@ -835,17 +904,17 @@ async def download_command(manga_id: str, volumes: Optional[str], language: str,
                          output_dir: str, keep_raw: bool, quality: int, 
                          kobo: bool, use_enhanced_builder: bool = True, use_official_covers: bool = True, 
                          create_kobo_collection: bool = True, collection_root: Optional[str] = None, validate: bool = True, 
-                         check_local: bool = True, force_download: bool = False) -> None:
+                         check_local: bool = True, force_download: bool = False, force_overwrite: bool = False) -> None:
     """Implementation of the download command."""
+    # Check disk space
+    space_info = check_disk_space(output_dir, required_mb=500)
+    if not space_info.get("enough_space", True):
+        click.secho(f"⚠️  Low disk space: {space_info.get('free_mb', 0)} MB available", fg="yellow")
+        if not click.confirm("Continue anyway?", default=False):
+            return
+    
+    # Get manga details
     try:
-        # Check disk space
-        space_info = check_disk_space(output_dir, required_mb=500)
-        if not space_info.get("enough_space", True):
-            click.secho(f"⚠️  Low disk space: {space_info.get('free_mb', 0)} MB available", fg="yellow")
-            if not click.confirm("Continue anyway?", default=False):
-                return
-        
-        # Get manga details
         manga_details = await get_manga_details(manga_id)
         manga_title = manga_details.get("title", "Unknown")
         
@@ -905,12 +974,13 @@ async def download_command(manga_id: str, volumes: Optional[str], language: str,
             validate=validate,
             check_local=check_local,
             force_download=force_download,
+            force_overwrite=force_overwrite,
             use_official_covers=use_official_covers,
             create_kobo_collection=create_kobo_collection,
             collection_root=collection_root
         )
-        
     except Exception as e:
+        # Handle any exceptions that occur during download
         error = error_handler.handle(e, category=ErrorCategory.UNEXPECTED)
         error_handler.display_error(error)
         logger.error(f"Error in download command: {e}")
@@ -926,15 +996,28 @@ async def interactive_command() -> None:
         click.echo("This mode will guide you through the process of downloading manga.")
         click.echo("You can exit at any time by pressing Ctrl+C.")
         
+        # Load configuration
+        config = Config()
+        
         # Check if logged in
         api = await get_api()
         
-        # Step 1: Login (optional)
-        if click.confirm("Do you want to log in to MangaDex?", default=False):
-            success = await login_flow()
-            if not success:
-                if not click.confirm("Continue without logging in?", default=True):
-                    return
+        # Step 1: Check login status
+        from .auth import get_auth_status
+        status = await get_auth_status()
+        
+        if status.get("logged_in", False):
+            click.echo(f"Currently logged in as: {status.get('username', 'Unknown')}")
+        else:
+            # Check if user has credentials saved in config
+            if not config.get("has_attempted_login", False):
+                # Only ask about login if user hasn't been prompted before
+                if click.confirm("Do you want to log in to MangaDex?", default=False):
+                    success = await login_flow()
+                    if not success and not click.confirm("Continue without logging in?", default=True):
+                        return
+                # Mark that we've attempted login at least once
+                config.set("has_attempted_login", True)
         
         # Step 2: Search for manga
         while True:
@@ -944,7 +1027,7 @@ async def interactive_command() -> None:
             
             # First ask if user wants to search across all languages
             all_languages = click.confirm("Search across all languages?", default=True)
-            language = None if all_languages else click.prompt("Language code", default="en")
+            language = None if all_languages else click.prompt("Language code", default=config.get("default_language", "en"))
             
             # Perform the search
             results = await search_manga(query, language)
@@ -973,7 +1056,7 @@ async def interactive_command() -> None:
             
             if not available_languages:
                 click.secho("No available languages found for this manga.", fg="yellow")
-                language = "en"  # Default to English
+                language = config.get("default_language", "en")  # Default from config
             else:
                 click.echo("\nAvailable languages for this manga:")
                 for i, lang in enumerate(sorted(available_languages)):
@@ -981,7 +1064,7 @@ async def interactive_command() -> None:
                 
                 # Let user select a language
                 while True:
-                    lang_selection = click.prompt("Enter language code or number", default="en")
+                    lang_selection = click.prompt("Enter language code or number", default=config.get("default_language", "en"))
                     
                     # Check if input is a number
                     try:
@@ -1015,7 +1098,6 @@ async def interactive_command() -> None:
                 continue
             
             # Step 6: Output options
-            config = Config()
             output_dir = click.prompt(
                 "Output directory",
                 default=config.get_output_dir()
@@ -1028,12 +1110,35 @@ async def interactive_command() -> None:
                 if not click.confirm("Continue anyway?", default=False):
                     continue
             
-            keep_raw = click.confirm("Keep raw downloaded files?", default=False)
-            quality = click.prompt("Image quality (1-100)", default=85, type=int)
-            kobo = click.confirm("Create Kobo-compatible EPUB?", default=True)
-            validate = click.confirm("Validate generated EPUBs?", default=True)
-            use_official_covers = click.confirm("Use official MangaDex volume covers when available?", default=True)
-            create_kobo_collection = click.confirm("Create a Kobo collection folder for easy device upload?", default=True)
+            # Load download preferences from config
+            prefs = config.get_download_preferences()
+            
+            # Check if preferences should be customized or saved
+            if config.get("download_prefs_saved", False):
+                # Use saved preferences
+                click.echo("\nUsing saved download preferences. To change them, use the 'config' command.")
+            else:
+                # Ask for preferences and save them
+                click.echo("\nPlease set your download preferences:")
+                
+                prefs["keep_raw"] = click.confirm("Keep raw downloaded files?", default=prefs["keep_raw"])
+                prefs["quality"] = click.prompt("Image quality (1-100)", default=prefs["quality"], type=int)
+                prefs["kobo"] = click.confirm("Create Kobo-compatible EPUB?", default=prefs["kobo"])
+                prefs["validate"] = click.confirm("Validate generated EPUBs?", default=prefs["validate"])
+                prefs["use_official_covers"] = click.confirm(
+                    "Use official MangaDex volume covers when available?", 
+                    default=prefs["use_official_covers"]
+                )
+                prefs["create_kobo_collection"] = click.confirm(
+                    "Create a Kobo collection folder for easy device upload?", 
+                    default=prefs["create_kobo_collection"]
+                )
+                
+                # Save preferences if user confirms
+                if click.confirm("Save these preferences for future downloads?", default=True):
+                    config.save_download_preferences(prefs)
+                    config.set("download_prefs_saved", True)
+                    click.echo("Preferences saved. You won't be asked for these preferences again.")
             
             # Step 7: Process manga
             await process_manga(
@@ -1041,18 +1146,20 @@ async def interactive_command() -> None:
                 manga_title=manga_title,
                 volumes=list(selected_volumes),
                 output_dir=output_dir,
-                keep_raw=keep_raw,
-                quality=quality,
-                kobo=kobo,
+                keep_raw=prefs["keep_raw"],
+                quality=prefs["quality"],
+                kobo=prefs["kobo"],
                 language=language,
-                validate=validate,
-                use_official_covers=use_official_covers,
-                create_kobo_collection=create_kobo_collection
+                validate=prefs["validate"],
+                use_official_covers=prefs["use_official_covers"],
+                create_kobo_collection=prefs["create_kobo_collection"],
+                use_enhanced_builder=prefs["use_enhanced_builder"],
+                check_local=prefs["check_local"],
+                force_download=prefs["force_download"]
             )
             
             if not click.confirm("Search for another manga?", default=True):
                 break
-        
         click.echo("=" * 60)
         click.secho("Thank you for using MangaBook!", fg="bright_blue", bold=True)
         click.echo("=" * 60)
@@ -1228,10 +1335,43 @@ async def history_command(output_dir: str) -> None:
     try:
         click.echo(f"Checking download history in: {output_dir}")
         
+        # First, check the history file and prune old entries
+        from .history import manga_history
+        
+        # Force a pruning of old entries and get stats
+        entries_removed = manga_history.prune_history(30)  # Keep last 30 days
+        
+        # Load history data to check statistics
+        history_data = manga_history.history_data
+        total_manga = len(history_data.get("manga", {}))
+        total_downloads = sum(
+            len(manga.get("downloads", [])) 
+            for manga in history_data.get("manga", {}).values()
+        )
+        
+        # Get the date of the last pruning
+        last_prune = history_data.get("last_prune")
+        if last_prune:
+            try:
+                last_prune_date = datetime.fromisoformat(last_prune)
+                last_prune_str = last_prune_date.strftime("%Y-%m-%d %H:%M")
+            except (ValueError, TypeError):
+                last_prune_str = "Unknown"
+        else:
+            last_prune_str = "Never"
+        
         # Ensure directory exists
         output_path = Path(output_dir)
         if not output_path.exists() or not output_path.is_dir():
             click.secho(f"Directory not found: {output_dir}", fg="yellow")
+            
+            # Show history stats even if directory doesn't exist
+            click.echo("\nManga History Statistics:")
+            click.echo(f"Total manga in history: {total_manga}")
+            click.echo(f"Total download entries: {total_downloads}")
+            click.echo(f"Last pruned: {last_prune_str}")
+            if entries_removed > 0:
+                click.echo(f"Entries pruned in this session: {entries_removed} (older than 30 days)")
             return
         
         # Find all EPUB files
@@ -1244,6 +1384,14 @@ async def history_command(output_dir: str) -> None:
         
         if not all_files:
             click.echo("No EPUB files found in the directory.")
+            
+            # Show history stats even if no files found
+            click.echo("\nManga History Statistics:")
+            click.echo(f"Total manga in history: {total_manga}")
+            click.echo(f"Total download entries: {total_downloads}")
+            click.echo(f"Last pruned: {last_prune_str}")
+            if entries_removed > 0:
+                click.echo(f"Entries pruned in this session: {entries_removed} (older than 30 days)")
             return
         
         click.secho(f"\nFound {len(all_files)} EPUB files:", fg="bright_blue")
@@ -1284,14 +1432,32 @@ async def history_command(output_dir: str) -> None:
         for manga, files in manga_groups.items():
             click.secho(f"\n{manga}", fg="bright_blue", bold=True)
             
-            # Sort by volume number if possible
-            def volume_sort_key(item):
-                vol = item["volume"]
-                if vol.lower().startswith("volume "):
+            # Custom sort function for volumes
+            def volume_sort_key(file_info):
+                vol = file_info["volume"]
+                
+                # Handle "Volume X" format
+                if vol.startswith("Volume "):
                     try:
-                        return float(vol[7:])
+                        # Extract and convert number
+                        return float(vol.replace("Volume ", ""))
                     except ValueError:
                         pass
+                
+                # Handle "Chapters X-Y" format
+                if vol.startswith("Chapters "):
+                    try:
+                        # Extract first chapter number for sorting
+                        chapter_range = vol.replace("Chapters ", "")
+                        first_chapter = chapter_range.split("-")[0]
+                        return 1000 + float(first_chapter)  # Add 1000 so chapters come after volumes
+                    except (ValueError, IndexError):
+                        pass
+                        
+                # For ungrouped chapters or non-standard formats
+                if vol.startswith("Ungrouped"):
+                    return 9999  # Sort at the end
+                    
                 return vol
                 
             files.sort(key=volume_sort_key)
@@ -1302,6 +1468,14 @@ async def history_command(output_dir: str) -> None:
         
         click.echo("\nTotal size: {:.1f} MB".format(sum(file["size_mb"] for files in manga_groups.values() for file in files)))
         click.echo("=" * 60)
+        
+        # Show history stats
+        click.echo("\nManga History Statistics:")
+        click.echo(f"Total manga in history: {total_manga}")
+        click.echo(f"Total download entries: {total_downloads}")
+        click.echo(f"Last pruned: {last_prune_str}")
+        if entries_removed > 0:
+            click.echo(f"Entries pruned in this session: {entries_removed} (older than 30 days)")
         
     except Exception as e:
         error = error_handler.handle(e, category=ErrorCategory.UNEXPECTED)
