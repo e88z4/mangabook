@@ -234,8 +234,19 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                         progress.update(1)
                         continue
                     
+                    # Format volume number with 3-digit zero-padding for filenames
+                    try:
+                        vol_num_float = float(volume_number)
+                        if vol_num_float.is_integer():
+                            vol_num_fmt = f"{int(vol_num_float):03d}"
+                        else:
+                            int_part = int(vol_num_float)
+                            vol_num_fmt = f"{int_part:03d}{str(vol_num_float)[str(vol_num_float).find('.'):]}"
+                    except ValueError:
+                        vol_num_fmt = str(volume_number)
+
                     # Create standard EPUB
-                    epub_filename = f"{sanitize_filename(manga_title)}_vol_{volume_number}.epub"
+                    epub_filename = f"{sanitize_filename(manga_title)}_vol_{vol_num_fmt}.epub"
                     
                     # Use manga_collection_dir for the epub_path
                     epub_path = manga_collection_dir / epub_filename
@@ -258,7 +269,7 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                     
                     # Create Kobo-compatible KEPUB if requested
                     if kobo:
-                        kepub_filename = f"{sanitize_filename(manga_title)}_vol_{volume_number}.kepub.epub"
+                        kepub_filename = f"{sanitize_filename(manga_title)}_vol_{vol_num_fmt}.kepub.epub"
                         # Use manga_collection_dir for kepub_path for consistency with output_dir
                         kepub_path = manga_collection_dir / kepub_filename
                         
@@ -289,7 +300,7 @@ async def process_manga(manga_id: str, manga_title: str, volumes: List[str],
                             
                             # Create a readable filename for the collection
                             readable_name = manga_title.replace('_', ' ')
-                            collection_filename = f"{readable_name} - Volume {volume_number}.kepub.epub"
+                            collection_filename = f"{readable_name} - Volume {vol_num_fmt}.kepub.epub"
                             collection_path = kobo_dir / collection_filename
                             
                             # Only need to copy the file if the paths are different
