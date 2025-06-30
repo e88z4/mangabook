@@ -1,0 +1,1 @@
+import asyncio, json; from mangabook.api import get_api; async def test(): api = await get_api(); volumes = await api.get_manga_volumes('7f30dfc3-0b80-4dcc-a3b9-0cd746fac005', 'en'); print('Available volume keys:', list(volumes.keys())); print('Ungrouped info: ', json.dumps(volumes.get('none', {}), indent=2)); await api.close(); asyncio.run(test())
