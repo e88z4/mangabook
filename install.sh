@@ -65,11 +65,18 @@ else
     print_yellow "If this is the first install, make sure the mangadex-api submodule is present"
 fi
 
+
+
 # Install dependencies
 print_blue "Installing dependencies..."
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 print_green "Dependencies installed"
+
+# Install mangadex-api submodule in editable mode
+print_blue "Installing mangadex-api submodule..."
+python3 -m pip install -e ./mangadex-api
+print_green "mangadex-api submodule installed"
 
 # Install package in development mode
 print_blue "Installing MangaBook..."
